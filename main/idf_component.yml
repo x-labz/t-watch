@@ -1,0 +1,4 @@
+dependencies:
+  idf: ">=5.0"
+  lewisxhe/sensorlib: "*"     # PCF8563, BMA423, DRV2605
+  # lvgl/lvgl: "^9"           # PATH B ONLY. Uncomment only when LVGL is requested.

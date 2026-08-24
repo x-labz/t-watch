@@ -1,0 +1,6 @@
+[submodule "components/LovyanGFX"]
+	path = components/LovyanGFX
+	url = https://github.com/lovyan03/LovyanGFX
+[submodule "components/XPowersLib"]
+	path = components/XPowersLib
+	url = https://github.com/lewisxhe/XPowersLib
