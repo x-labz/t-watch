@@ -77,11 +77,17 @@ Touch reading: use LovyanGFX `Touch_FT5x06` (covers FT6x36) so `lcd.getTouch()` 
 ### GPS — Quectel L76K on UART
 | Signal      | GPIO |
 |-------------|------|
-| GPS TX → ESP RX | 26 |
-| GPS RX ← ESP TX | 36 |
+| GPS TX → ESP RX | 36 |
+| GPS RX ← ESP TX | 26 |
 | WAKEUP (drive high to wake) | 33 |
 | 1PPS        | 34 |
 Power: AXP202 **LDO4**. 9600 baud default, NMEA.
+
+**Confirmed on hardware 2026-08-25:** the two GPIOs above were previously listed swapped in
+this file (26/36 reversed) — no NMEA data was ever received until corrected. Verified against
+LilyGO's own vendor board header (`src/board/twatch2020_v2.h`: `GPS_RX=36, GPS_TX=26`). This
+also makes physical sense: GPIO36 is input-only on classic ESP32, so it has to be the ESP's RX
+pin (listening to the GPS module's TX), not the other way around.
 
 ### Misc
 - IR LED transmitter: GPIO 2 (use RMT peripheral)
