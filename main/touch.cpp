@@ -17,6 +17,9 @@ static std::atomic<uint32_t> s_err_count{0};
 
 static constexpr uint8_t kRegStatus = 0x02;   // TD_STATUS, XH, XL, YH, YL
 
+// Panel geometry, needed for the raw->screen mapping in touch_read().
+static constexpr int32_t kScreenH = 240;
+
 // FocalTech registers (names/values from LilyGO's own focaltech driver).
 static constexpr uint8_t kRegMonitorTime = 0x87;     // idle seconds before active->monitor
 static constexpr uint8_t kRegMonitorPeriod = 0x89;   // report period while in monitor
@@ -160,8 +163,21 @@ bool touch_read(int32_t *x, int32_t *y)
     if (points == 0 || points > 2) {
         return false;
     }
-    *x = ((int32_t)(buf[1] & 0x0F) << 8) | buf[2];
-    *y = ((int32_t)(buf[3] & 0x0F) << 8) | buf[4];
+    int32_t raw_x = ((int32_t)(buf[1] & 0x0F) << 8) | buf[2];
+    int32_t raw_y = ((int32_t)(buf[3] & 0x0F) << 8) | buf[4];
+
+    // Raw -> screen, in one place so no caller has to think about it.
+    //
+    // Two corrections compose here:
+    //   1. this unit reports X mirrored relative to the panel (long-standing,
+    //      confirmed on hardware), i.e. screen_x would be (W-1) - raw_x;
+    //   2. the panel itself is driven rotated 180° (offset_rotation = 2 in
+    //      lgfx_twatch_v2.hpp), which flips BOTH axes again.
+    // Applying (2) on top of (1) cancels the X mirror and leaves Y flipped:
+    //   x = (W-1) - ((W-1) - raw_x) = raw_x
+    //   y = (H-1) - raw_y
+    *x = raw_x;
+    *y = (kScreenH - 1) - raw_y;
     return true;
 }
 

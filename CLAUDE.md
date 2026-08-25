@@ -50,6 +50,20 @@ SoC: ESP32-D0WDQ6 (classic ESP32, dual core, 240 MHz, **no USB-JTAG**).
 Panel needs `invert = true`. Target SPI clock: **80 MHz** (see section 8); fall back
 to 40 MHz only if 80 shows visual corruption on your unit.
 
+**The panel is mounted upside down** relative to the ST7789's native scan order,
+so it needs `offset_rotation = 2` (180°) — confirmed on hardware 2026-08-25.
+Set it in the *panel config*, not via `setRotation()` after init, so the strip
+pipeline (which pushes straight to the panel, section 8) stays consistent with
+sprite-based draws.
+
+**Touch coordinates are mapped to screen space in `touch.cpp`, once.** Two
+corrections compose: this unit reports X mirrored relative to the panel, and
+the 180° rotation flips both axes — which cancels on X and leaves Y flipped, so
+`x = raw_x`, `y = 239 - raw_y`. `touch_read()` therefore returns true screen
+coordinates and UI code does no correction of its own. Keep it that way: the
+mirror used to be applied ad-hoc at each call site, which is easy to get
+inconsistent between hit-testing and swipe direction.
+
 ### I2C bus 0 — "sensor bus" (SDA=21, SCL=22, 400 kHz)
 | Device  | Addr | Role |
 |---------|------|------|

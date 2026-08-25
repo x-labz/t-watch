@@ -9,9 +9,10 @@
 // unit, leaving touch permanently dead.
 esp_err_t touch_init(void);
 
-// True when a finger is down; fills *x/*y with raw panel coordinates.
-// Note the panel reports X mirrored relative to the display on this unit —
-// callers correct for it (see ui_task.cpp).
+// True when a finger is down; fills *x/*y with SCREEN coordinates — origin
+// top-left as drawn, matching what render functions use. The raw-panel to
+// screen mapping (this unit's X mirror, plus the 180° panel rotation set in
+// lgfx_twatch_v2.hpp) lives in touch.cpp so callers never deal with it.
 bool touch_read(int32_t *x, int32_t *y);
 
 // --- diagnostics / recovery ---------------------------------------------

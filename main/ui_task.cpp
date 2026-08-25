@@ -311,9 +311,8 @@ static void ui_task_fn(void *arg)
         ESP_LOGI(TAG, "view -> %s", view_name(current));
     };
 
-    // Shared by physical taps and the debug-console "tap" command.
-    // screen_x is already mirror-corrected (see the swipe-direction comment
-    // at the physical-touch call site).
+    // Shared by physical taps and the debug-console "tap" command; screen_x is
+    // in screen coordinates either way.
     auto do_tap = [&](int32_t screen_x) {
         bool right_half = screen_x >= (kScreenW / 2);
         if (current == ViewId::HAPTIC) {
@@ -484,10 +483,10 @@ static void ui_task_fn(void *arg)
                      (int)start_x, (int)start_y, (int)last_x, (int)last_y, (int)dx, (int)dy);
 
             if (iabs(dx) >= kSwipeThresholdPx && iabs(dx) > iabs(dy)) {
-                // This unit's touch panel reports X mirrored relative to the
-                // display (confirmed on hardware), so the sign is inverted
-                // here rather than in the touch driver's coordinate pipeline.
-                bool to_enters_from_right = dx > 0;
+                // dx is in screen coordinates (touch.cpp does the raw->screen
+                // mapping). Dragging the finger leftwards pulls the next view
+                // in from the right, like flicking through pages.
+                bool to_enters_from_right = dx < 0;
                 uint8_t idx = static_cast<uint8_t>(current);
                 uint8_t next_idx = idx;
                 if (to_enters_from_right && idx + 1 < static_cast<uint8_t>(ViewId::COUNT)) {
@@ -499,12 +498,9 @@ static void ui_task_fn(void *arg)
                 switch_view(next, to_enters_from_right);
             } else if (current == ViewId::HAPTIC || current == ViewId::SETTINGS ||
                        current == ViewId::WIFI || current == ViewId::BLE) {
-                // Small displacement = a tap, not a swipe. This unit's touch
-                // panel reports X mirrored relative to the display (see the
-                // swipe-direction fix above), so undo that for absolute
-                // hit-testing too, not just the relative dx sign.
-                int32_t screen_x = (kScreenW - 1) - last_x;
-                do_tap(screen_x);
+                // Small displacement = a tap, not a swipe. Already in screen
+                // coordinates, so it can be hit-tested directly.
+                do_tap(last_x);
             }
         }
 

@@ -40,6 +40,13 @@ public:
             c.panel_height = 240;
             c.invert = true;
             c.rgb_order = false;
+            // The panel is mounted upside down relative to the controller's
+            // native scan order on this board, so everything rendered at
+            // rotation 0 appears 180° out. Set it here rather than calling
+            // setRotation() after init, so every draw path (including the
+            // strip pipeline, which pushes straight to the panel) is
+            // consistent. Touch is corrected to match in touch.cpp.
+            c.offset_rotation = 2;   // 2 = 180°
             _panel.config(c);
         }
         {
