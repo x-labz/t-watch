@@ -95,6 +95,9 @@ static void debug_console_task(void *)
             cmd.type = DebugCmdType::TOUCH_WRITE;
             cmd.reg = (uint8_t)r;
             cmd.val = (uint8_t)v;
+        } else if (strncmp(line, "exten ", 6) == 0) {
+            cmd.type = DebugCmdType::EXTEN_SET;
+            cmd.flag = (line[6] == '1');
         } else if (strncmp(line, "ldo3 ", 5) == 0) {
             cmd.type = DebugCmdType::LDO3_MODE;
             cmd.flag = (line[5] == '1' || strcmp(line + 5, "dcin") == 0);

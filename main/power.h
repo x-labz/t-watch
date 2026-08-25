@@ -35,9 +35,26 @@ void power_gps_power(bool on);
 // Used both during init and to recover a touch controller that has wedged.
 void power_touch_reset(void);
 
+// True when the AXP202's EXTEN output is asserted, i.e. the FT6336 is NOT held
+// in reset. Reads REG12 bit 0 directly — do not use XPowersLib's
+// isEnableExternalPin(), which reads bit 6 (that is LDO3) and will report the
+// panel rail's state instead.
+bool power_exten_is_on(void);
+
+// Test hook: drive EXTEN directly. `false` holds the FT6336 in reset, which
+// reproduces the "touch is dead and nothing brings it back" failure exactly.
+void power_set_exten(bool on);
+
 // Reports LDO2/LDO3 enable state + voltage, for diagnosing whether a dead
 // peripheral is actually an unpowered one.
 void power_log_rails(void);
+
+// Dumps the AXP202's control/voltage registers over raw I2C. Called at the
+// very start of power_init(), BEFORE any of our own writes, so the log shows
+// the state inherited from whatever firmware ran last — PMU registers are
+// battery-backed and survive reflashes (section 3). Diffing this between our
+// firmware and LilyGO's is how to find what the vendor sets that we don't.
+void power_dump_axp_registers(const char *when);
 
 // Logs every address that ACKs on I2C bus 0 (expect AXP202 0x35, BMA423 0x19,
 // PCF8563 0x51, DRV2605 0x5A). A healthy bus 0 next to a silent bus 1 says the

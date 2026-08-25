@@ -18,6 +18,82 @@ i2c_master_bus_handle_t power_get_i2c_bus0(void)
     return s_i2c_bus0;
 }
 
+// Raw AXP202 register read — XPowersLib keeps readRegister() protected, and
+// for a state-comparison dump we want the untouched bytes anyway.
+static int axp_read_raw(uint8_t reg)
+{
+    i2c_master_dev_handle_t dev = nullptr;
+    i2c_device_config_t cfg = {};
+    cfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+    cfg.device_address = TWATCH_ADDR_AXP202;
+    cfg.scl_speed_hz = 400000;
+    if (i2c_master_bus_add_device(s_i2c_bus0, &cfg, &dev) != ESP_OK) return -1;
+
+    uint8_t val = 0;
+    esp_err_t err = i2c_master_transmit_receive(dev, &reg, 1, &val, 1, 100);
+    i2c_master_bus_rm_device(dev);
+    return err == ESP_OK ? (int)val : -1;
+}
+
+static esp_err_t axp_write_raw(uint8_t reg, uint8_t val)
+{
+    i2c_master_dev_handle_t dev = nullptr;
+    i2c_device_config_t cfg = {};
+    cfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+    cfg.device_address = TWATCH_ADDR_AXP202;
+    cfg.scl_speed_hz = 400000;
+    if (i2c_master_bus_add_device(s_i2c_bus0, &cfg, &dev) != ESP_OK) return ESP_FAIL;
+
+    uint8_t buf[2] = {reg, val};
+    esp_err_t err = i2c_master_transmit(dev, buf, sizeof(buf), 100);
+    i2c_master_bus_rm_device(dev);
+    return err;
+}
+
+// AXP202 REG12H, power output control. XPowersLib gets EXTEN WRONG: its
+// enableExternalPin()/disableExternalPin() write bit 6 — the very same bit as
+// enableLDO3() — so calling them silently switched the panel+touch rail off
+// and on and never drove the real EXTEN pin at all. On the AXP202, EXTEN is
+// bit 0. Because EXTEN is this board's only touch-reset line, that bug meant
+// the FT6336 could be left held in reset with no way for our firmware to
+// release it: it stopped answering I2C, looked exactly like dead hardware, and
+// only came back after LilyGO's firmware (which sets the bit correctly) ran.
+// Written raw here rather than via the library so the two cannot collide again.
+static constexpr uint8_t kAxpRegOutputCtl = 0x12;
+static constexpr uint8_t kAxpExtenBit = 0;
+
+static void axp_set_exten(bool on)
+{
+    int cur = axp_read_raw(kAxpRegOutputCtl);
+    if (cur < 0) {
+        ESP_LOGE(TAG, "EXTEN: could not read REG12");
+        return;
+    }
+    uint8_t val = on ? (uint8_t)(cur | (1u << kAxpExtenBit))
+                     : (uint8_t)(cur & ~(1u << kAxpExtenBit));
+    axp_write_raw(kAxpRegOutputCtl, val);
+}
+
+void power_dump_axp_registers(const char *when)
+{
+    // 0x10 output control, 0x12 rail enables (bit6 = EXTEN), 0x23-0x2A rail
+    // voltages/modes, 0x30-0x33 VBUS/charge, 0x40-0x4A IRQ enables,
+    // 0x80-0x84 ADC enables, 0x90-0x93 GPIO config.
+    static const uint8_t regs[] = {
+        0x10, 0x12, 0x13, 0x23, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A,
+        0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,
+        0x40, 0x41, 0x42, 0x43, 0x44,
+        0x80, 0x82, 0x83, 0x84, 0x85, 0x86,
+        0x90, 0x91, 0x92, 0x93,
+    };
+    ESP_LOGW(TAG, "==== AXP202 register dump (%s) ====", when);
+    for (uint8_t r : regs) {
+        int v = axp_read_raw(r);
+        if (v >= 0) ESP_LOGW(TAG, "  axp[0x%02X] = 0x%02X", r, (unsigned)v);
+        else        ESP_LOGW(TAG, "  axp[0x%02X] = <read failed>", r);
+    }
+}
+
 esp_err_t power_init(void)
 {
     i2c_master_bus_config_t bus_cfg = {};
@@ -39,6 +115,9 @@ esp_err_t power_init(void)
         return ESP_FAIL;
     }
     ESP_LOGI(TAG, "AXP202 chip id: 0x%02x", s_pmu.getChipID());
+
+    // Before we change anything — this is the state the previous firmware left.
+    power_dump_axp_registers("inherited, before our writes");
 
     // LDO3: panel + touch controller power — must be up before lcd.init().
     // Set the regulation mode explicitly: AXP202 registers are battery-backed
@@ -75,7 +154,7 @@ esp_err_t power_init(void)
     ESP_LOGI(TAG, "LDO2(backlight)=%s %umV  LDO3(panel/touch)=%s %umV  EXTEN(touch rst)=%s",
              s_pmu.isEnableLDO2() ? "ON" : "OFF", s_pmu.getLDO2Voltage(),
              s_pmu.isEnableLDO3() ? "ON" : "OFF", s_pmu.getLDO3Voltage(),
-             s_pmu.isEnableExternalPin() ? "ON" : "OFF");
+             power_exten_is_on() ? "ON" : "OFF");
 
     return ESP_OK;
 }
@@ -94,9 +173,14 @@ BatteryReading power_read_battery(void)
 
 void power_touch_reset(void)
 {
-    s_pmu.disableExternalPin();
+    // Real reset pulse on EXTEN (REG12 bit 0). LilyGO's driver holds it low for
+    // 8 ms ("Trst Min = 5ms"); 20 ms is comfortably past that. Crucially this
+    // leaves LDO3 (bit 6) alone, so the panel is not disturbed — the previous
+    // implementation was toggling LDO3 instead and never resetting the FT6336.
+    axp_set_exten(false);
     vTaskDelay(pdMS_TO_TICKS(20));
-    s_pmu.enableExternalPin();
+    axp_set_exten(true);
+    vTaskDelay(pdMS_TO_TICKS(10));
 }
 
 void power_log_rails(void)
@@ -107,7 +191,20 @@ void power_log_rails(void)
              s_pmu.isEnableLDO3() ? "ON" : "OFF", s_pmu.getLDO3Voltage(),
              power_get_ldo3_dcin_mode() ? "DCIN" : "LDO",
              s_pmu.isEnableLDO4() ? "ON" : "OFF", s_pmu.getLDO4Voltage(),
-             s_pmu.isEnableExternalPin() ? "ON" : "OFF");
+             power_exten_is_on() ? "ON" : "OFF");
+}
+
+void power_set_exten(bool on)
+{
+    axp_set_exten(on);
+    ESP_LOGW(TAG, "EXTEN forced %s (REG12 bit0) -> reads %s",
+             on ? "ON" : "OFF", power_exten_is_on() ? "ON" : "OFF");
+}
+
+bool power_exten_is_on(void)
+{
+    int cur = axp_read_raw(kAxpRegOutputCtl);
+    return cur >= 0 && (cur & (1u << kAxpExtenBit)) != 0;
 }
 
 bool power_get_ldo3_dcin_mode(void)
