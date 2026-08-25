@@ -24,3 +24,8 @@ struct BatteryReading {
 
 // Reads the AXP202 fuel gauge. Valid only after power_init() returns ESP_OK.
 BatteryReading power_read_battery(void);
+
+// AXP202 LDO4 — GPS module power. Off by default (CLAUDE.md section 9: GPS
+// is the biggest power consumer, gate it to only when a fix is being
+// acquired). See gps.h for the refcounted acquire/release wrapper.
+void power_gps_power(bool on);

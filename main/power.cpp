@@ -88,3 +88,16 @@ BatteryReading power_read_battery(void)
     r.percent = pct < 0 ? 0 : pct;
     return r;
 }
+
+void power_gps_power(bool on)
+{
+    if (on) {
+        bool volt_ok = s_pmu.setLDO4Voltage(TWATCH_LDO4_GPS_MV);
+        bool en_ok = s_pmu.enableLDO4();
+        ESP_LOGI(TAG, "LDO4(gps) setVoltage=%d enable=%d -> isEnabled=%s %umV",
+                 volt_ok, en_ok, s_pmu.isEnableLDO4() ? "ON" : "OFF", s_pmu.getLDO4Voltage());
+    } else {
+        s_pmu.disableLDO4();
+        ESP_LOGI(TAG, "LDO4(gps) disabled -> isEnabled=%s", s_pmu.isEnableLDO4() ? "ON" : "OFF");
+    }
+}

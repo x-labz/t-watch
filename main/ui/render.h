@@ -10,3 +10,4 @@
 // the PC simulator build (CLAUDE.md section 6 / section 10).
 void render_watchface(LGFX_Sprite &fb, const WatchfaceVM &vm);
 void render_battery(LGFX_Sprite &fb, const BatteryVM &vm);
+void render_gps(LGFX_Sprite &fb, const GpsVM &vm);

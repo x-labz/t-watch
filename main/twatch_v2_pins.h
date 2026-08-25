@@ -37,11 +37,16 @@
 #define TWATCH_PIN_IRQ_AXP202    35   // also the PEK (power key) IRQ line
 
 // --- GPS: Quectel L76K on UART ---
-#define TWATCH_PIN_GPS_RX        26   // GPS TX -> ESP RX
-#define TWATCH_PIN_GPS_TX        36   // GPS RX <- ESP TX
+// CLAUDE.md section 2 documents these reversed — confirmed against LilyGO's
+// own vendor board header (src/board/twatch2020_v2.h): GPS_RX=36, GPS_TX=26.
+// GPIO36 (ESP RX, listens for the GPS module's TX) is input-only on classic
+// ESP32, which is exactly why it has to be the RX pin, not TX.
+#define TWATCH_PIN_GPS_RX        36   // ESP RX <- GPS TX
+#define TWATCH_PIN_GPS_TX        26   // ESP TX -> GPS RX (unused: RX-only)
 #define TWATCH_PIN_GPS_WAKEUP    33
 #define TWATCH_PIN_GPS_1PPS      34
 #define TWATCH_GPS_BAUD          9600
+#define TWATCH_GPS_UART_NUM      1
 
 // --- Misc ---
 #define TWATCH_PIN_IR_LED        2    // transmit-only, drive via RMT
@@ -49,3 +54,4 @@
 // --- AXP202 rail voltages used at init (see CLAUDE.md section 3) ---
 #define TWATCH_LDO2_BACKLIGHT_MV 3300
 #define TWATCH_LDO3_PANEL_MV     3300
+#define TWATCH_LDO4_GPS_MV       3300

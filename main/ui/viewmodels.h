@@ -18,3 +18,16 @@ struct BatteryVM {
     bool charging = false;
     bool vbus_in = false;
 };
+
+struct GpsVM {
+    bool has_fix = false;
+    uint8_t satellites_used = 0;
+    uint8_t satellites_in_view = 0;
+    float hdop = 0;
+    float altitude_m = 0;
+    float speed_kmh = 0;
+    double latitude = 0;
+    double longitude = 0;
+    uint8_t utc_hh = 0, utc_mm = 0, utc_ss = 0;
+    uint32_t sentence_count = 0;
+};

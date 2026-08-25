@@ -9,6 +9,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "gps.h"
 #include "power.h"
 #include "touch.h"
 #include "ui/render.h"
@@ -48,12 +49,41 @@ static BatteryVM to_battery_vm(const BatteryReading &r)
     return vm;
 }
 
-static void render_view(ViewId id, LGFX_Sprite &frame, const WatchfaceVM &wf, const BatteryVM &batt)
+static GpsVM to_gps_vm(const GpsReading &r)
 {
-    if (id == ViewId::WATCHFACE) {
-        render_watchface(frame, wf);
-    } else {
-        render_battery(frame, batt);
+    GpsVM vm;
+    vm.has_fix = r.has_fix;
+    vm.satellites_used = r.satellites_used;
+    vm.satellites_in_view = r.satellites_in_view;
+    vm.hdop = r.hdop;
+    vm.altitude_m = r.altitude_m;
+    vm.speed_kmh = r.speed_kmh;
+    vm.latitude = r.latitude;
+    vm.longitude = r.longitude;
+    vm.utc_hh = r.utc_hh;
+    vm.utc_mm = r.utc_mm;
+    vm.utc_ss = r.utc_ss;
+    vm.sentence_count = r.sentence_count;
+    return vm;
+}
+
+static const char *view_name(ViewId id)
+{
+    switch (id) {
+        case ViewId::WATCHFACE: return "WATCHFACE";
+        case ViewId::BATTERY: return "BATTERY";
+        case ViewId::GPS: return "GPS";
+        default: return "?";
+    }
+}
+
+static void render_view(ViewId id, LGFX_Sprite &frame, const WatchfaceVM &wf, const BatteryVM &batt, const GpsVM &gps)
+{
+    switch (id) {
+        case ViewId::WATCHFACE: render_watchface(frame, wf); break;
+        case ViewId::BATTERY: render_battery(frame, batt); break;
+        case ViewId::GPS: render_gps(frame, gps); break;
+        default: break;
     }
 }
 
@@ -151,8 +181,9 @@ static void ui_task_fn(void *arg)
     ViewId current = ViewId::WATCHFACE;
     WatchfaceVM wf{};
     BatteryVM batt = to_battery_vm(power_read_battery());
+    GpsVM gps = to_gps_vm(gps_read());
 
-    render_view(current, *frame_cur, wf, batt);
+    render_view(current, *frame_cur, wf, batt, gps);
     push_frame_locked(lcd, *frame_cur, pm_lock);
 
     bool touching = false;
@@ -165,8 +196,9 @@ static void ui_task_fn(void *arg)
             wf.mm = (secs / 60) % 60;
             wf.ss = secs % 60;
             batt = to_battery_vm(power_read_battery());
+            gps = to_gps_vm(gps_read());
 
-            render_view(current, *frame_cur, wf, batt);
+            render_view(current, *frame_cur, wf, batt, gps);
             push_frame_locked(lcd, *frame_cur, pm_lock);
         }
 
@@ -189,24 +221,33 @@ static void ui_task_fn(void *arg)
                      (int)start_x, (int)start_y, (int)last_x, (int)last_y, (int)dx, (int)dy);
 
             if (iabs(dx) >= kSwipeThresholdPx && iabs(dx) > iabs(dy)) {
-                ViewId next = current;
                 // This unit's touch panel reports X mirrored relative to the
                 // display (confirmed on hardware), so the sign is inverted
                 // here rather than in the touch driver's coordinate pipeline.
                 bool to_enters_from_right = dx > 0;
-                if (to_enters_from_right && current == ViewId::WATCHFACE) {
-                    next = ViewId::BATTERY;
-                } else if (!to_enters_from_right && current == ViewId::BATTERY) {
-                    next = ViewId::WATCHFACE;
+                uint8_t idx = static_cast<uint8_t>(current);
+                uint8_t next_idx = idx;
+                if (to_enters_from_right && idx + 1 < static_cast<uint8_t>(ViewId::COUNT)) {
+                    next_idx = idx + 1;
+                } else if (!to_enters_from_right && idx > 0) {
+                    next_idx = idx - 1;
                 }
+                ViewId next = static_cast<ViewId>(next_idx);
 
                 if (next != current) {
-                    render_view(next, *frame_other, wf, batt);
+                    render_view(next, *frame_other, wf, batt, gps);
                     animate_swipe(lcd, *frame_cur, *frame_other, to_enters_from_right, strips, pm_lock);
+
+                    // GPS is the single biggest power draw on this board
+                    // (CLAUDE.md section 9) — only powered while its view is
+                    // actually focused.
+                    if (current == ViewId::GPS) gps_release();
+                    if (next == ViewId::GPS) gps_acquire();
+
                     current = next;
                     std::swap(frame_cur, frame_other);
                     ESP_LOGI(TAG, "view -> %s (dx=%d dy=%d) batt: connected=%d pct=%d mv=%u chg=%d vbus=%d wf=%02u:%02u:%02u",
-                             current == ViewId::WATCHFACE ? "WATCHFACE" : "BATTERY", (int)dx, (int)dy,
+                             view_name(current), (int)dx, (int)dy,
                              batt.battery_connected, batt.percent, batt.voltage_mv, batt.charging, batt.vbus_in,
                              wf.hh, wf.mm, wf.ss);
                 }
