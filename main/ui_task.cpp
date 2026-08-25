@@ -397,6 +397,15 @@ static void ui_task_fn(void *arg)
                 case DebugCmdType::TOUCH_FIX:
                     touch_recover();
                     break;
+                case DebugCmdType::TOUCH_SLEEP:
+                    touch_force_deepsleep();
+                    break;
+                case DebugCmdType::LDO3_MODE:
+                    power_set_ldo3_dcin_mode(dbg.flag);
+                    vTaskDelay(pdMS_TO_TICKS(200));
+                    ESP_LOGW(TAG, "after LDO3 mode change: probe(0x38)=%s",
+                             esp_err_to_name(touch_probe()));
+                    break;
                 default: break;
             }
         }

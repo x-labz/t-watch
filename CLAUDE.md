@@ -169,7 +169,17 @@ software for power (section 9).
 - Capacitive, up to 2 simultaneous points (multi-touch), IRQ on GPIO38
 - On-chip gesture registers exist but are unreliable — do gesture detection in
   software from point deltas (section 6)
-- Has a low-power monitor mode; in practice it powers down with LDO3 anyway
+- **Power modes (reg 0xA5) — the #1 cause of "touch hardware is dead":**
+  `0 = ACTIVE (~4mA)`, `1 = MONITOR (~3mA)`, `3 = DEEPSLEEP (~100µA)`.
+  **In DEEPSLEEP the chip does not ACK on I2C at all** — an address scan of
+  bus 1 comes back completely empty and reads fail with `ESP_ERR_INVALID_STATE`,
+  which looks exactly like a failed/disconnected controller. Per LilyGO's own
+  driver, the only documented way out is pulling the reset line (AXP202 EXTEN)
+  low. Never diagnose "the FT6336 is dead" without first resetting it and
+  explicitly writing ACTIVE to 0xA5 — see section 13.
+- Related registers worth setting at init (LilyGO does): `0xA4`=1 enables the
+  touch interrupt, `0x87` monitor-entry time (default 0x0A), `0x89` monitor
+  report period (default 0x28)
 
 **DRV2605 (haptics)**
 - 123 pre-programmed ROM effects (clicks, ticks, buzzes, ramps, alerts)
@@ -222,6 +232,28 @@ PMU init = black screen + dead touch, with zero error messages.
 
 If the display ever wedges: there is no RST pin — disable LDO3, delay 100 ms,
 re-enable, re-run lcd.init().
+
+### NEVER INHERIT DEVICE STATE — always set it explicitly (learned the hard way)
+Flashing does **not** reset the peripherals. LDO3 stays powered right through a
+reflash, so the panel and FT6336 never cold-boot; AXP202 registers are
+battery-backed and survive resets, reflashes, and even a battery pull while USB
+is attached. **Anything you do not explicitly program, you inherit from whatever
+firmware ran last** — including LilyGO's vendor firmware.
+
+This produced a genuinely nasty bug on 2026-08-25: the FT6336 was sitting in
+DEEPSLEEP (section 2), ignoring I2C completely. It presented as dead touch
+hardware that survived reboots and a battery pull, while vendor firmware
+"fixed" it — because vendor firmware programs the chip explicitly and we did
+not. Hours went into chasing a hardware fault that did not exist.
+
+Rules that follow:
+- `power_init()` sets **LDO3 mode** explicitly (`XPOWERS_AXP202_LDO3_MODE_LDO`),
+  not just voltage/enable. Inheriting DCIN mode drives this rail to ~5.08 V.
+- `touch_init()` resets via EXTEN and writes power mode ACTIVE rather than
+  assuming the controller is awake.
+- When a peripheral looks dead, ask "what state could it be stuck in?" before
+  "is it broken?" — and reproduce the suspected state deliberately to confirm
+  (there is a `touchsleep` console command for exactly this).
 
 ---
 
@@ -760,7 +792,11 @@ exercises the real code path, not a parallel one.
 | `view <name>` | jump to a view: watchface, battery, gps, tilt, haptic, settings, wifi |
 | `next` / `prev` | swipe to the next/previous view |
 | `tap [left\|right]` | simulate a tap (default center) |
-| `status` | log current view + key state |
+| `status` | log current view + key state + free heap (catches radio-cycle leaks) |
+| `touch` | touch health: consecutive I2C errors, probe of 0x38, rail states, scan of BOTH I2C buses |
+| `touchfix` | force touch recovery (LDO3 cycle + EXTEN reset + reconfigure) |
+| `touchsleep` | put the FT6336 into DEEPSLEEP — reproduces the "dead touch" failure on demand |
+| `ldo3 0\|1` | set AXP202 LDO3 mode (0 = LDO, 1 = DCIN). Diagnostic only — **leave it at 0** |
 
 This exists because physical-gesture testing races the serial capture window
 (the agent cannot time a swipe against a `timeout N cat`). Scripted repro:
@@ -824,6 +860,8 @@ tier 3 "is my panel config right?".
 | FPS far below target | Sprite silently in PSRAM (DMA can't read PSRAM), SPI at 40 MHz, or missing startWrite/endWrite — check all three, measure with DEBUG_FPS |
 | Touch dead, I2C addr 0x38 NACKs | EXTEN not toggled (touch stuck in reset), or LDO3 off |
 | Touch works then dies after sleep | EXTEN disabled during sleep, not re-toggled on wake |
+| **Touch totally dead: I2C1 scan finds ZERO devices, reads fail `ESP_ERR_INVALID_STATE`, survives reboot AND battery pull, but bus 0 is fine and the panel renders** | **FT6336 left in DEEPSLEEP (reg 0xA5 = 3)** — it draws 100µA and ignores I2C entirely. This is NOT dead hardware, though it is indistinguishable from it by measurement alone. Hit for real 2026-08-25 and misdiagnosed as a hardware failure for hours. Fix: EXTEN reset, then explicitly write `0xA5 = 0` (ACTIVE). `touch_init()` now does this and `touch_read()` self-heals after ~5 s of solid failure. Console: `touch` to inspect, `touchfix` to force recovery, `touchsleep` to reproduce it |
+| Touch dead only in OUR firmware but fine in vendor firmware | Same DEEPSLEEP cause as above. **Key lesson: state persists across reflashes.** LDO3 stays powered through a flash, so the FT6336 never cold-boots, and AXP202 registers are battery-backed too. Flashing vendor firmware "fixes" it because that firmware explicitly programs the chip — which is why the bug looked like it lived in our code when it lived in inherited *device state* |
 | Watch won't enumerate on USB | Watch powered off (long-press PEK), or dead battery |
 | Flash fails "Failed to write to target RAM" | Lower baud (460800/115200); check CH340 driver |
 | Permission denied /dev/ttyUSB0 | User not in dialout group |

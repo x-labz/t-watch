@@ -48,3 +48,10 @@ void power_scan_bus0(void);
 // the only way to truly reset the panel, which has no RST pin (section 3).
 // Caller must re-run lcd.init() afterwards if it cares about the display.
 void power_cycle_ldo3(void);
+
+// AXP202 REG29 bit7 selects how LDO3 regulates. LilyGO's own driver sets this
+// to DCIN whenever it powers the panel/touch rail up, and back to LDO when it
+// sleeps — we never set it at all, so we inherit whatever the last firmware
+// left in the PMU (its registers survive reflashes and resets). true = DCIN.
+bool power_get_ldo3_dcin_mode(void);
+void power_set_ldo3_dcin_mode(bool dcin);

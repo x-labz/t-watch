@@ -22,3 +22,7 @@ uint32_t touch_error_count(void);          // consecutive failed reads
 esp_err_t touch_probe(void);               // does 0x38 ACK right now?
 esp_err_t touch_recover(void);             // EXTEN reset + re-add I2C device
 void touch_scan_bus(void);                 // log every address that ACKs on I2C1
+
+// Test hook: drops the controller into DEEPSLEEP, reproducing the "touch is
+// dead and never comes back" failure so the recovery path can be verified.
+esp_err_t touch_force_deepsleep(void);

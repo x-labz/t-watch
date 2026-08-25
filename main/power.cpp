@@ -41,6 +41,11 @@ esp_err_t power_init(void)
     ESP_LOGI(TAG, "AXP202 chip id: 0x%02x", s_pmu.getChipID());
 
     // LDO3: panel + touch controller power — must be up before lcd.init().
+    // Set the regulation mode explicitly: AXP202 registers are battery-backed
+    // and survive reflashes, so without this we silently inherit whatever the
+    // previously-flashed firmware left behind. DCIN mode drives this rail well
+    // above 3.3 V (measured 5076 mV on this board), so pin it to LDO.
+    s_pmu.setLDO3Mode(XPOWERS_AXP202_LDO3_MODE_LDO);
     s_pmu.setLDO3Voltage(TWATCH_LDO3_PANEL_MV);
     s_pmu.enableLDO3();
 
@@ -96,12 +101,28 @@ void power_touch_reset(void)
 
 void power_log_rails(void)
 {
-    ESP_LOGI(TAG, "rails: LDO2(backlight)=%s %umV  LDO3(panel/touch)=%s %umV  "
+    ESP_LOGI(TAG, "rails: LDO2(backlight)=%s %umV  LDO3(panel/touch)=%s %umV mode=%s  "
                   "LDO4(gps)=%s %umV  EXTEN(touch rst)=%s",
              s_pmu.isEnableLDO2() ? "ON" : "OFF", s_pmu.getLDO2Voltage(),
              s_pmu.isEnableLDO3() ? "ON" : "OFF", s_pmu.getLDO3Voltage(),
+             power_get_ldo3_dcin_mode() ? "DCIN" : "LDO",
              s_pmu.isEnableLDO4() ? "ON" : "OFF", s_pmu.getLDO4Voltage(),
              s_pmu.isEnableExternalPin() ? "ON" : "OFF");
+}
+
+bool power_get_ldo3_dcin_mode(void)
+{
+    // XPowersLib names this isLDO3LDOMode(), but it returns REG29 bit7 raw,
+    // and bit7 SET is DCIN mode (setLDO3Mode sets the bit for DCIN, clears it
+    // for LDO). The library's name is simply backwards — don't "fix" this to
+    // read the other way round.
+    return s_pmu.isLDO3LDOMode();
+}
+
+void power_set_ldo3_dcin_mode(bool dcin)
+{
+    s_pmu.setLDO3Mode(dcin ? XPOWERS_AXP202_LDO3_MODE_DCIN : XPOWERS_AXP202_LDO3_MODE_LDO);
+    ESP_LOGW(TAG, "LDO3 mode -> %s", power_get_ldo3_dcin_mode() ? "DCIN" : "LDO");
 }
 
 void power_scan_bus0(void)

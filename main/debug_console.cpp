@@ -80,6 +80,11 @@ static void debug_console_task(void *)
             cmd.type = DebugCmdType::TOUCH_INFO;
         } else if (strcmp(line, "touchfix") == 0) {
             cmd.type = DebugCmdType::TOUCH_FIX;
+        } else if (strcmp(line, "touchsleep") == 0) {
+            cmd.type = DebugCmdType::TOUCH_SLEEP;
+        } else if (strncmp(line, "ldo3 ", 5) == 0) {
+            cmd.type = DebugCmdType::LDO3_MODE;
+            cmd.flag = (line[5] == '1' || strcmp(line + 5, "dcin") == 0);
         } else {
             ESP_LOGW(TAG, "unknown command '%s' (try: view <name>, next, prev, tap [left|right], "
                           "status, touch, touchfix)", line);

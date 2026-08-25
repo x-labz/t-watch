@@ -6,6 +6,8 @@
 
 #include "driver/i2c_master.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "TOUCH";
 
@@ -14,6 +16,24 @@ static i2c_master_dev_handle_t s_dev = nullptr;
 static std::atomic<uint32_t> s_err_count{0};
 
 static constexpr uint8_t kRegStatus = 0x02;   // TD_STATUS, XH, XL, YH, YL
+
+// FocalTech registers (names/values from LilyGO's own focaltech driver).
+static constexpr uint8_t kRegMonitorTime = 0x87;     // idle seconds before active->monitor
+static constexpr uint8_t kRegMonitorPeriod = 0x89;   // report period while in monitor
+static constexpr uint8_t kRegIntStatus = 0xA4;       // 1 = interrupt on touch
+static constexpr uint8_t kRegPowerMode = 0xA5;
+
+// FOCALTECH_PMODE_*: ACTIVE ~4mA, MONITOR ~3mA, DEEPSLEEP ~100uA. In DEEPSLEEP
+// the chip does not answer I2C at all and, per the vendor header, "the reset
+// pin must be pulled down to wake up" — that is the AXP202 EXTEN line here.
+// A watch that boots with the controller left in DEEPSLEEP therefore looks
+// exactly like dead touch hardware, which is why init below always resets
+// first and then states the power mode explicitly instead of inheriting it.
+static constexpr uint8_t kPmodeActive = 0x00;
+static constexpr uint8_t kMonitorTimeDefault = 0x0A;
+static constexpr uint8_t kMonitorPeriodDefault = 0x28;
+
+static constexpr uint32_t kAutoRecoverAfterErrors = 250;   // ~5 s at the 50 Hz poll rate
 
 static esp_err_t add_device(void)
 {
@@ -27,6 +47,27 @@ static esp_err_t add_device(void)
         ESP_LOGE(TAG, "FT6336 add device failed: %s", esp_err_to_name(err));
     }
     return err;
+}
+
+static esp_err_t write_reg(uint8_t reg, uint8_t val)
+{
+    uint8_t buf[2] = {reg, val};
+    return i2c_master_transmit(s_dev, buf, sizeof(buf), 50);
+}
+
+// Puts the controller into a known state rather than trusting whatever mode it
+// was left in. Only meaningful once the chip is answering — the caller resets
+// it first if it is not.
+static void configure_chip(void)
+{
+    esp_err_t err = write_reg(kRegPowerMode, kPmodeActive);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "could not set power mode: %s", esp_err_to_name(err));
+        return;
+    }
+    write_reg(kRegIntStatus, 1);
+    write_reg(kRegMonitorTime, kMonitorTimeDefault);
+    write_reg(kRegMonitorPeriod, kMonitorPeriodDefault);
 }
 
 esp_err_t touch_init(void)
@@ -44,7 +85,27 @@ esp_err_t touch_init(void)
         ESP_LOGE(TAG, "i2c bus1 init failed: %s", esp_err_to_name(err));
         return err;
     }
-    return add_device();
+    err = add_device();
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    // If the controller is in DEEPSLEEP it will not ACK until EXTEN has pulsed
+    // it, so probe first and reset only when needed. Init still succeeds if it
+    // stays silent — touch_read()'s auto-recovery keeps retrying — because a
+    // dead touch panel must not stop the rest of the watch from booting.
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if (touch_probe() == ESP_OK) {
+            configure_chip();
+            ESP_LOGI(TAG, "FT6336 ready (attempt %d)", attempt + 1);
+            return ESP_OK;
+        }
+        ESP_LOGW(TAG, "FT6336 not answering, EXTEN reset (attempt %d)", attempt + 1);
+        power_touch_reset();
+        vTaskDelay(pdMS_TO_TICKS(60));   // controller boot time after reset
+    }
+    ESP_LOGE(TAG, "FT6336 still not answering after 3 resets — continuing without touch");
+    return ESP_OK;
 }
 
 bool touch_read(int32_t *x, int32_t *y)
@@ -57,8 +118,15 @@ bool touch_read(int32_t *x, int32_t *y)
         // failure, so a wedged controller is visible in the log without
         // spamming it at the 50 Hz poll rate.
         uint32_t n = s_err_count.fetch_add(1, std::memory_order_relaxed) + 1;
-        if (n == 1 || (n % 250) == 0) {
+        if (n == 1 || (n % kAutoRecoverAfterErrors) == 0) {
             ESP_LOGW(TAG, "i2c read failed (%s), %u consecutive", esp_err_to_name(err), (unsigned)n);
+        }
+        // Self-heal: a controller that dropped into DEEPSLEEP never comes back
+        // on its own, and previously that left the watch looking permanently
+        // frozen with no way back short of reflashing. Retry periodically
+        // rather than once, since the first reset does not always take.
+        if (n % kAutoRecoverAfterErrors == 0) {
+            touch_recover();
         }
         return false;
     }
@@ -98,6 +166,14 @@ void touch_scan_bus(void)
              found, TWATCH_ADDR_FT6336);
 }
 
+esp_err_t touch_force_deepsleep(void)
+{
+    ESP_LOGW(TAG, "forcing FT6336 into DEEPSLEEP (test hook)");
+    esp_err_t err = write_reg(kRegPowerMode, 0x03);
+    ESP_LOGW(TAG, "write power mode DEEPSLEEP: %s", esp_err_to_name(err));
+    return err;
+}
+
 esp_err_t touch_recover(void)
 {
     ESP_LOGW(TAG, "recovering FT6336: LDO3 power-cycle + EXTEN reset + re-add device");
@@ -109,10 +185,22 @@ esp_err_t touch_recover(void)
     // power-cycle (which also resets the panel — it shares LDO3).
     power_cycle_ldo3();
     esp_err_t err = add_device();
-    if (err == ESP_OK) {
-        s_err_count.store(0, std::memory_order_relaxed);
-        err = touch_probe();
-        ESP_LOGW(TAG, "after recovery, probe 0x%02x: %s", TWATCH_ADDR_FT6336, esp_err_to_name(err));
+    if (err != ESP_OK) {
+        return err;
     }
+    s_err_count.store(0, std::memory_order_relaxed);
+
+    err = touch_probe();
+    if (err != ESP_OK) {
+        // The rail cycle alone can leave it asleep; EXTEN is the documented
+        // wake for DEEPSLEEP, so pulse it again and give it time to boot.
+        power_touch_reset();
+        vTaskDelay(pdMS_TO_TICKS(60));
+        err = touch_probe();
+    }
+    if (err == ESP_OK) {
+        configure_chip();
+    }
+    ESP_LOGW(TAG, "after recovery, probe 0x%02x: %s", TWATCH_ADDR_FT6336, esp_err_to_name(err));
     return err;
 }
