@@ -792,6 +792,19 @@ but need the BMA423 feature engine's config-file upload, which we do not
 currently do (section 2). Waking pulses EXTEN to bring touch back — which only
 works because the EXTEN bit is now driven correctly (section 3).
 
+**MEASURED on battery 2026-08-25** (`powerlog`, steady-state samples only —
+transition samples straddle both states and are excluded):
+| State | Measured | Section 9 target |
+|---|---|---|
+| Screen ON (backlight 99/255) | **59 mA** (median 63, range 35–97, n=50) | < 45 mA — **over** |
+| Screen OFF, light sleep | **5 mA** (n=17 across runs) | < 4 mA — slightly over |
+Idle draw went from ~59 mA (CPU pinned at 240 MHz, screen never blanking) to
+~5 mA: roughly 12x, or ~6 hours to ~3 days of idle on the 380 mAh cell.
+Neither target is quite met yet. The obvious next lever for screen-ON is that
+the UI pushes a full 115 KB frame every second even when only the clock digits
+changed — section 8's dirty-rect shortcut ("the cheapest fps of all is pixels
+you don't send") applies directly.
+
 **Verified 2026-08-25** with `pmlocks` (`CONFIG_PM_PROFILING=y` + `esp_pm_dump_locks`):
 66% of time in light sleep, 23% awake at 40 MHz, 10% at 240 MHz,
 `light_sleep_reject_counts:0` — against 100% pinned at 240 MHz before.
