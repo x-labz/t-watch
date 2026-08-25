@@ -766,6 +766,53 @@ idf.py build
 idf.py -p "$PORT" -b 921600 flash          # drop to 460800/115200 on sync errors
 ```
 
+### Flash/boot is UNRELIABLE on this unit — always retry in a loop
+A successful flash frequently still boots into the brownout loop (`rst:0x10
+(RTCWDT_RTC_RESET)`, `csum err`, garbage `load:` addresses). On a bad day it
+took 5 attempts. Never treat one failed attempt as a result — script the retry,
+re-resolving the port each pass since a brownout renumbers it:
+```bash
+for a in 1 2 3 4 5; do
+  PORT=$(ls /dev/ttyACM* /dev/ttyUSB* 2>/dev/null | head -1)
+  [ -z "$PORT" ] && { sleep 3; continue; }              # watch dropped off USB
+  idf.py -p "$PORT" -b 460800 flash > flash.log 2>&1
+  grep -q "Hash of data verified" flash.log || continue
+  stty -F "$PORT" 115200 raw -echo && timeout 12 cat "$PORT" > boot.log
+  grep -q "<a line your app prints late in boot>" boot.log && break
+done
+```
+
+### A serial capture is only EVIDENCE if the firmware was alive for it
+This is the single easiest way to reach a confidently wrong conclusion here.
+An empty log looks identical whether the watch is idle, brownout-looping, or
+off USB entirely — all three happened while "testing" touch on 2026-08-25, and
+each empty log was briefly mistaken for "the feature is broken". Before drawing
+*any* negative conclusion from a capture, confirm all three:
+1. `ls /dev/ttyACM* /dev/ttyUSB*` still shows a port (it can vanish mid-test),
+2. `grep -c 'rst:0x10' capture.log` is **0** (no brownout resets in the window),
+3. the log contains periodic output proving the app was running — GPS lines
+   during time-sync, or send `status` over the console and see it answer.
+Builds that print nothing while idle need (3) explicitly; for a human-in-the-
+loop test also ask the user to confirm something live on screen (a ticking
+clock), because they may simply not have been touching the watch.
+
+### Vendor firmware — the ground-truth "is it really the hardware?" test
+When a peripheral looks physically dead, LilyGO's stock firmware settles it,
+because it drives every chip on the board:
+```bash
+curl -fsSL -o vendor.bin \
+  https://raw.githubusercontent.com/Xinyuan-LilyGO/TTGO_TWatch_Library/master/bin/2020-v2/twatch-2020-v2-220531.bin
+esptool.py --chip esp32 -p "$PORT" -b 460800 write_flash 0x0 vendor.bin
+```
+It is a **merged full-flash image**: offset `0x0` is `0xff` padding (so
+`esptool.py image_info` on it fails — that is normal), bootloader at `0x1000`,
+partition table `0x8000`, app `0x10000`. Plain esptool, not idf.py — it is an
+Arduino/PlatformIO build. Restoring ours afterwards is just `idf.py flash`.
+**Read the result carefully:** vendor firmware working proves the hardware is
+fine, but does NOT prove our code is buggy — it may simply be programming
+device state we never set (see the section-3 rule). That exact mis-reading
+cost hours on 2026-08-25.
+
 If a fresh `dialout` group membership hasn't propagated to the current shell yet
 (`groups` doesn't list it, commands below get `Permission denied`), wrap the
 command with `sg dialout -c "..."` rather than re-running `usermod` — the
@@ -881,8 +928,10 @@ tier 3 "is my panel config right?".
 | **Touch totally dead: I2C1 scan finds ZERO devices, reads fail `ESP_ERR_INVALID_STATE`, survives reboot AND battery pull, but bus 0 is fine and the panel renders** | **FT6336 left in DEEPSLEEP (reg 0xA5 = 3)** — it draws 100µA and ignores I2C entirely. This is NOT dead hardware, though it is indistinguishable from it by measurement alone. Hit for real 2026-08-25 and misdiagnosed as a hardware failure for hours. Fix: EXTEN reset, then explicitly write `0xA5 = 0` (ACTIVE). `touch_init()` now does this and `touch_read()` self-heals after ~5 s of solid failure. Console: `touch` to inspect, `touchfix` to force recovery, `touchsleep` to reproduce it |
 | Touch dead only in OUR firmware but fine in vendor firmware | Same DEEPSLEEP cause as above. **Key lesson: state persists across reflashes.** LDO3 stays powered through a flash, so the FT6336 never cold-boots, and AXP202 registers are battery-backed too. Flashing vendor firmware "fixes" it because that firmware explicitly programs the chip — which is why the bug looked like it lived in our code when it lived in inherited *device state* |
 | **Touch reads SUCCEED (0 I2C errors, 0x38 probes OK, registers read sane values) but `0x02` is always 0 — no finger is ever reported** | **Over-configuration, not a fault.** Writing the INT-mode (`0xA4`) / monitor-timing (`0x87`) registers at init leaves the chip healthy-looking but not reporting points to a polling driver (hit 2026-08-25 while "fixing" the DEEPSLEEP bug above — the fix caused this). An EXTEN reset already gives working defaults: force ONLY power mode `0xA5`=0 and write nothing else. Use `touchdump` to compare against the sanity values in section 2 |
-| Watch won't enumerate on USB | Watch powered off (long-press PEK), or dead battery |
+| Watch won't enumerate on USB | Watch powered off (long-press PEK), or dead battery. **Also happens spontaneously mid-session** on this unit — the port simply disappears, and any capture then reads nothing while the watch looks fine. Check `lsusb` for `1a86:55d4` before blaming firmware |
 | Flash fails "Failed to write to target RAM" | Lower baud (460800/115200); check CH340 driver |
+| Flash succeeds but the board boot-loops: `rst:0x10 (RTCWDT_RTC_RESET)` / `csum err` / garbage `load:` addresses | Marginal power delivery on this unit, NOT the firmware — it reproduces on read-only `esptool.py flash_id` and on every build including trivial ones. Just retry the flash (loop it, section 11); it usually takes on the 2nd-3rd attempt. Reseating the battery connector measurably helped (clean first-try boots, and the PMU started reporting `charging=1`) |
+| A serial capture is empty / a feature "does nothing" | Do not conclude anything yet — verify the firmware was actually alive for that window (section 11). Port vanished, brownout loop, and idle-silent builds all produce identical empty logs |
 | Permission denied /dev/ttyUSB0 | User not in dialout group |
 | Random reboots when GPS on | Brownout: enable LDO4 only when needed, check battery |
 | Everything dies after `esp_deep_sleep_start` | Expected: only RTC domain survives; re-run full init order on wake |
