@@ -151,7 +151,22 @@ software for power (section 9).
 - PEK button: short/long-press IRQs (GPIO35), 6 s force-poweroff in hardware
 - All measurements are battery-total — per-rail attribution only by toggle-and-diff
 
-**BMA423 (accelerometer) — do NOT reimplement these in software**
+**BMA423 (accelerometer)** — driven DIRECTLY, not via SensorLib.
+`SensorBMA423`'s `bma423_init()` fails on this board with `BMA4_E_COM_FAIL`
+(-2) every time, at boot and on demand, while raw reads of the same registers
+on the same bus succeed (chip id `0x00` reads `0x13`). The fault is in the
+library's plumbing, not the chip, so `main/tilt.cpp` talks to it over raw I2C —
+the same call already made for the DRV2605 in `haptic.cpp`.
+That path configures the accelerometer only: `0x7C`=0 (power save off),
+`0x40`=0xA8 (100 Hz), `0x41`=0 (±2g), `0x7D`=0x04 (accel on), then reads 6
+bytes from `0x12`. Data is 12-bit signed left-aligned in each 16-bit LE pair,
+so `(int16_t)(msb<<8|lsb)/16` sign-extends it; ±2g means 1g = 1024 counts.
+Sanity check: the vector magnitude must be ~1g at rest.
+**The features below still need SensorLib's ~6 KB config-file upload**, which
+is exactly what fails — so they are NOT available today. Revisit that upload
+before planning anything that depends on them:
+
+**BMA423 hardware features — do NOT reimplement these in software (once available)**
 - 3-axis accel, µA-level operation (that's why it's the always-on wake source)
 - Hardware step counter (pedometer with on-chip algorithm)
 - Wrist-tilt / raise-to-wake detection, single & double tap detection
@@ -901,6 +916,8 @@ exercises the real code path, not a parallel one.
 | `touchmon` | poll raw touch status for 10 s — proves whether the sensor reports points at all |
 | `treg <hex> <hex>` | write any FT6336 register, so config hypotheses can be tested without a reflash |
 | `exten 0\|1` | drive the touch reset line (REG12 bit 0). `exten 0` reproduces "dead touch" exactly |
+| `bma` | BMA423 health: probe, raw chip id, config registers, live reading (~1g at rest) |
+| `bmainit` | re-run the BMA423 init now |
 | `ldo3 0\|1` | set AXP202 LDO3 mode (0 = LDO, 1 = DCIN). Diagnostic only — **leave it at 0** |
 
 **Diagnosing touch is a two-question problem, and conflating them wasted hours
@@ -986,7 +1003,8 @@ tier 3 "is my panel config right?".
 | Battery drains overnight | LDO4/GPS or WiFi left on, or no sleep ladder — audit section 9 gating table |
 | Display corrupts only when idle/DFS on | Frame pushed without CPU/APB max-freq lock held (section 9) |
 | `Interrupt wdt timeout`, one core looping in `vListInsert`/`vTaskPlaceOnEventList`, other spinning on the tick spinlock | A **blocking call inside `portENTER_CRITICAL`**. Interrupts are off and a spinlock is held, so blocking corrupts scheduler state and wedges both cores. Hit for real with `esp_wifi_scan_get_ap_records()` inside the lock (2026-08-25). Critical sections may ONLY copy plain data — never call a driver/IPC/WiFi API inside one |
-| Boot log ends at `tilt_init() failed` (`bma423_init failed with code -2`) | **Fixed 2026-08-25 — `app_main()` no longer aborts on it.** It used to `return` on any failed init step, so one flaky peripheral killed the whole boot: the UI task never started and the watch presented as frozen with no way in. Only `power_init()` and `lcd.init()` are load-bearing now; everything else logs and continues. The BMA423 flake itself is transient (it ACKs at 0x19 but `bma423_init` fails), and `tilt_init()` retries 3× before giving up |
+| `bma423_init failed with code -2` (`BMA4_E_COM_FAIL`) from SensorLib, yet the chip ACKs at 0x19 | **A SensorLib bug, not the chip.** Raw I2C reads of the same registers work perfectly (chip id = 0x13) at the same moment SensorLib fails, at boot and on demand alike. Fixed by driving the BMA423 directly in `tilt.cpp` (section 2). Diagnose with the `bma` console command, which probes, raw-reads the id, and prints a live reading — magnitude should be ~1g |
+| (historical) Boot log ends at `tilt_init() failed` (`bma423_init failed with code -2`) | **Fixed 2026-08-25 — `app_main()` no longer aborts on it.** It used to `return` on any failed init step, so one flaky peripheral killed the whole boot: the UI task never started and the watch presented as frozen with no way in. Only `power_init()` and `lcd.init()` are load-bearing now; everything else logs and continues. The BMA423 flake itself is transient (it ACKs at 0x19 but `bma423_init` fails), and `tilt_init()` retries 3× before giving up |
 | Watch "freezes on startup" — display static, but the serial console still answers `view`/`next` yet NOT `status` | The **UI task is not running** while the console task is. `status` is handled by the UI task, so no reply to it means the UI task never started or is wedged. Check the boot log for an init step that returned early. Everything the UI task owns — rendering, touch polling, touch auto-recovery — is dead in this state |
 
 ## 14. Power-key (PEK) handling

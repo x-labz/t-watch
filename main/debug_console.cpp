@@ -95,6 +95,10 @@ static void debug_console_task(void *)
             cmd.type = DebugCmdType::TOUCH_WRITE;
             cmd.reg = (uint8_t)r;
             cmd.val = (uint8_t)v;
+        } else if (strcmp(line, "bmainit") == 0) {
+            cmd.type = DebugCmdType::BMA_RETRY;
+        } else if (strcmp(line, "bma") == 0) {
+            cmd.type = DebugCmdType::BMA_DIAG;
         } else if (strncmp(line, "exten ", 6) == 0) {
             cmd.type = DebugCmdType::EXTEN_SET;
             cmd.flag = (line[6] == '1');

@@ -419,6 +419,12 @@ static void ui_task_fn(void *arg)
                 case DebugCmdType::EXTEN_SET:
                     power_set_exten(dbg.flag);
                     break;
+                case DebugCmdType::BMA_DIAG:
+                    tilt_diagnose();
+                    break;
+                case DebugCmdType::BMA_RETRY:
+                    tilt_retry_init();
+                    break;
                 case DebugCmdType::LDO3_MODE:
                     power_set_ldo3_dcin_mode(dbg.flag);
                     vTaskDelay(pdMS_TO_TICKS(200));

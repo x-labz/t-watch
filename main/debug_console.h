@@ -19,6 +19,8 @@
 //   touchmon                  - poll raw touch status for 10s while you touch
 //   treg <hex> <hex>          - write an FT6336 register (e.g. `treg A4 0`)
 //   exten 0|1                 - drive the touch reset line; 0 reproduces dead touch
+//   bma                       - diagnose the BMA423 (probe, raw chip id, soft reset)
+//   bmainit                   - re-run the SensorLib BMA423 init now
 
 enum class DebugCmdType : uint8_t {
     NONE,
@@ -35,6 +37,8 @@ enum class DebugCmdType : uint8_t {
     TOUCH_MON,
     TOUCH_WRITE,
     EXTEN_SET,
+    BMA_DIAG,
+    BMA_RETRY,
 };
 
 struct DebugCmd {
