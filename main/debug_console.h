@@ -72,3 +72,8 @@ void debug_console_start(void);
 
 // Non-blocking: returns true and fills *cmd if a command is pending.
 bool debug_console_poll(DebugCmd *cmd);
+
+// Console traffic pins the chip awake for a few seconds so that a burst of
+// commands is not swallowed by light sleep. Call periodically from the UI
+// loop to drop that hold once the console has gone quiet.
+void debug_console_release_if_idle(void);

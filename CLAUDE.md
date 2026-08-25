@@ -1023,15 +1023,21 @@ kill %1; exec 3<&-'
 Add a command here rather than adding a one-off test build whenever a bug needs
 a repeatable trigger.
 
-**Light sleep eats the first command.** With automatic light sleep enabled
-(section 9), the bytes that wake the chip are consumed, so the first command
-sent after an idle period is silently lost — no "unknown command" warning, just
-nothing. Send a bare newline, pause ~1 s, then the real command:
+**Light sleep eats the first command(s) — send two newlines first.** The bytes
+that wake the chip are consumed by the UART wake, so commands sent to a
+sleeping watch vanish **silently**: no "unknown command", no output at all.
+This looks exactly like broken firmware and has already caused one wrong
+diagnosis (and cost an RTC-memory measurement, because the "fix" was to
+reflash). Always open a session with:
 ```bash
-printf "\n" >&3; sleep 1; printf "view gps\n" >&3
+printf "\n" >&3; sleep 1; printf "\n" >&3; sleep 1   # wake the console
+printf "status\n" >&3                                 # now commands land
 ```
-Once the screen is on the UI holds the no-sleep lock and the console is
-reliable again, so this only bites the first command of a session.
+Any console line then pins the chip awake for 15 s (`debug_console_release_if_idle()`),
+so the rest of a burst is reliable. **If a command produces no output, wake the
+console and retry before concluding anything** — and never reflash to
+"fix" it, since that destroys any RTC-memory diagnostic state you were
+collecting.
 
 ### Crash decoding
 ```bash

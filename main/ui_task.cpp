@@ -405,6 +405,8 @@ static void ui_task_fn(void *arg)
     int32_t start_x = 0, start_y = 0, last_x = 0, last_y = 0;
 
     for (;;) {
+        debug_console_release_if_idle();
+
         DebugCmd dbg;
         while (debug_console_poll(&dbg)) {
             // Navigation/tap commands must behave like touching the watch,

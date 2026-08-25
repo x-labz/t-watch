@@ -6,12 +6,29 @@
 #include <cstring>
 
 #include "esp_log.h"
+#include "powersave.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 
 static const char *TAG = "DBGCON";
 static QueueHandle_t s_queue;
+
+// How long the console keeps the chip awake after the last received line.
+static constexpr int64_t kConsoleAwakeUs = 15LL * 1000000;
+static bool s_console_awake = false;
+static int64_t s_console_active_until_us = 0;
+
+// Lets the chip sleep again once the console has been quiet. Called from the
+// UI task's loop so no extra task is needed for it.
+void debug_console_release_if_idle(void)
+{
+    if (s_console_awake && esp_timer_get_time() > s_console_active_until_us) {
+        s_console_awake = false;
+        powersave_prevent_sleep(false);
+    }
+}
 
 // Order matches ViewId in ui/view.h — kept as plain strings here rather than
 // pulling in ui/view.h, since this console has no other reason to know about
@@ -46,6 +63,19 @@ static void debug_console_task(void *)
         }
         trim_trailing_newline(line);
         lowercase_inplace(line);
+
+        // Keep the chip awake for a while after ANY console traffic, including
+        // the bare newline used to wake it. Light sleep stops the UART clock,
+        // so without this only the first command of a burst lands and the rest
+        // vanish silently — which reads exactly like "the firmware is broken"
+        // and cost real debugging time. A blank line is therefore a useful
+        // command in itself: it wakes the console and holds it open.
+        if (!s_console_awake) {
+            s_console_awake = true;
+            powersave_prevent_sleep(true);
+        }
+        s_console_active_until_us = esp_timer_get_time() + kConsoleAwakeUs;
+
         if (line[0] == '\0') continue;
 
         DebugCmd cmd;
