@@ -4,6 +4,7 @@
 #include "touch.h"
 #include "gps.h"
 #include "tilt.h"
+#include "time_sync.h"
 #include "ui_task.h"
 
 static const char *TAG = "MAIN";
@@ -47,7 +48,10 @@ extern "C" void app_main(void)
         ESP_LOGE(TAG, "tilt_init() failed");
         return;
     }
-    ESP_LOGI(TAG, "tilt_init() OK — starting UI task");
+    ESP_LOGI(TAG, "tilt_init() OK");
+
+    time_sync_start();
+    ESP_LOGI(TAG, "time_sync_start() — starting UI task");
 
     ui_task_start(lcd);
 }

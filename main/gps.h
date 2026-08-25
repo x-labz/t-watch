@@ -14,6 +14,9 @@ struct GpsReading {
     double latitude = 0;
     double longitude = 0;
     uint8_t utc_hh = 0, utc_mm = 0, utc_ss = 0;
+    bool has_date_time = false;       // $RMC status=='A' and a date was parsed
+    uint8_t date_day = 0, date_month = 0, date_year = 0;  // date_year is
+                                      // years since 2000 (NMEA's 2-digit yy)
     uint8_t satellites_in_view = 0;   // from the most recent $GSV sentence
     uint32_t sentence_count = 0;      // every NMEA line seen, any type — proof
                                       // the UART link + module are alive even

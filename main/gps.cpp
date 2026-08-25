@@ -83,6 +83,22 @@ static void parse_rmc(char *fields[], int n)
     float knots = (float)atof(fields[7]);
     s_reading.speed_kmh = knots * 1.852f;
     s_reading.course_deg = (float)atof(fields[8]);
+
+    // Date/time in $RMC comes from the satellite navigation message, decoded
+    // independently of the position solution — don't gate it on the "A"
+    // (valid fix) status flag, or the clock waits far longer than it needs
+    // to. Just sanity-check the date is in range, not all-zero garbage.
+    if (n >= 10 && strlen(fields[9]) >= 6) {
+        uint8_t day = (fields[9][0] - '0') * 10 + (fields[9][1] - '0');
+        uint8_t month = (fields[9][2] - '0') * 10 + (fields[9][3] - '0');
+        uint8_t year = (fields[9][4] - '0') * 10 + (fields[9][5] - '0');
+        if (day >= 1 && day <= 31 && month >= 1 && month <= 12) {
+            s_reading.date_day = day;
+            s_reading.date_month = month;
+            s_reading.date_year = year;
+            s_reading.has_date_time = true;
+        }
+    }
     portEXIT_CRITICAL(&s_lock);
 }
 

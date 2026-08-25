@@ -1,6 +1,7 @@
 #include "ui_task.h"
 
 #include <atomic>
+#include <ctime>
 #include <utility>
 
 #include "esp_log.h"
@@ -12,6 +13,7 @@
 #include "gps.h"
 #include "power.h"
 #include "tilt.h"
+#include "time_sync.h"
 #include "touch.h"
 #include "ui/render.h"
 #include "ui/view.h"
@@ -27,12 +29,10 @@ static constexpr int64_t kSwipeDurationUs = 200000;
 static constexpr uint32_t kTiltRefreshUs = 66000;   // ~15 Hz while TILT is focused
 
 static std::atomic<bool> s_tick_pending{false};
-static std::atomic<uint32_t> s_seconds{0};
 static std::atomic<bool> s_tilt_tick_pending{false};
 
 static void tick_cb(void *)
 {
-    s_seconds.fetch_add(1, std::memory_order_relaxed);
     s_tick_pending.store(true, std::memory_order_relaxed);
 }
 
@@ -222,10 +222,15 @@ static void ui_task_fn(void *arg)
 
     for (;;) {
         if (s_tick_pending.exchange(false, std::memory_order_relaxed)) {
-            uint32_t secs = s_seconds.load(std::memory_order_relaxed);
-            wf.hh = (secs / 3600) % 24;
-            wf.mm = (secs / 60) % 60;
-            wf.ss = secs % 60;
+            // Before a GPS fix syncs the clock, time(nullptr) just counts up
+            // from the epoch since boot — same visual behavior the old
+            // free-running counter had, but it becomes real wall time the
+            // moment settimeofday() is called, with no special-casing here.
+            time_t local = time(nullptr) + time_sync_get_utc_offset_seconds();
+            wf.hh = (local / 3600) % 24;
+            wf.mm = (local / 60) % 60;
+            wf.ss = local % 60;
+            wf.gps_sync_blink = time_sync_in_progress() && ((local % 2) == 0);
             batt = to_battery_vm(power_read_battery());
             gps = to_gps_vm(gps_read());
             tilt = to_tilt_vm(tilt_read());

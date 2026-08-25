@@ -9,6 +9,7 @@ struct WatchfaceVM {
     uint8_t hh = 0;
     uint8_t mm = 0;
     uint8_t ss = 0;
+    bool gps_sync_blink = false;   // toggled ~1Hz while boot-time GPS time sync is in progress
 };
 
 struct BatteryVM {
