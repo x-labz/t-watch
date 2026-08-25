@@ -20,6 +20,10 @@ struct BatteryVM {
     bool vbus_in = false;
 };
 
+// Mirrors TzStatus in time_sync.h; duplicated as a plain enum so ui/ stays
+// free of any non-UI header (CLAUDE.md section 6: ui/ must compile in the sim).
+enum class GpsTzVM : uint8_t { CACHED, WAITING_FOR_FIX, ACQUIRED };
+
 struct GpsVM {
     bool has_fix = false;
     uint8_t satellites_used = 0;
@@ -31,6 +35,9 @@ struct GpsVM {
     double longitude = 0;
     uint8_t utc_hh = 0, utc_mm = 0, utc_ss = 0;
     uint32_t sentence_count = 0;
+    GpsTzVM tz_status = GpsTzVM::CACHED;
+    int32_t utc_offset_sec = 0;
+    bool clock_set = false;
 };
 
 struct TiltVM {

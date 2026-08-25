@@ -84,6 +84,13 @@ static GpsVM to_gps_vm(const GpsReading &r)
     vm.utc_mm = r.utc_mm;
     vm.utc_ss = r.utc_ss;
     vm.sentence_count = r.sentence_count;
+    vm.utc_offset_sec = time_sync_get_utc_offset_seconds();
+    vm.clock_set = !time_sync_in_progress();
+    switch (time_sync_tz_status()) {
+        case TzStatus::ACQUIRED:        vm.tz_status = GpsTzVM::ACQUIRED; break;
+        case TzStatus::WAITING_FOR_FIX: vm.tz_status = GpsTzVM::WAITING_FOR_FIX; break;
+        default:                        vm.tz_status = GpsTzVM::CACHED; break;
+    }
     return vm;
 }
 
@@ -296,8 +303,8 @@ static void ui_task_fn(void *arg)
 
         // GPS is the single biggest power draw on this board (CLAUDE.md
         // section 9) — only powered while its view is actually focused.
-        if (current == ViewId::GPS) gps_release();
-        if (next == ViewId::GPS) gps_acquire();
+        if (current == ViewId::GPS) { gps_release(); time_sync_gps_session_end(); }
+        if (next == ViewId::GPS) { gps_acquire(); time_sync_gps_session_begin(); }
 
         current = next;
         std::swap(frame_cur, frame_other);
@@ -430,6 +437,12 @@ static void ui_task_fn(void *arg)
             wf.ss = local % 60;
             wf.gps_sync_blink = time_sync_in_progress() && ((local % 2) == 0);
             batt = to_battery_vm(power_read_battery());
+            // Timezone/clock derivation happens only while the GPS view is
+            // open — that is the only time the receiver is powered at all
+            // (CLAUDE.md section 9), and it keeps boot free of GPS entirely.
+            if (current == ViewId::GPS) {
+                time_sync_feed_gps(gps_read());
+            }
             gps = to_gps_vm(gps_read());
             tilt = to_tilt_vm(tilt_read());
             if (current == ViewId::WIFI) wifi = to_wifi_vm(wifi_scan_read());

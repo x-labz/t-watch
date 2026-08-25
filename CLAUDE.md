@@ -158,8 +158,13 @@ software for power (section 9).
 - Activity classification (still / walking / running), any-motion & no-motion
 - All of the above as interrupts on GPIO39 — screen wake costs ~zero CPU
 
-**PCF8563 (RTC)**
+**PCF8563 (RTC)** — **this is the watch's clock; GPS is not**
 - Battery-backed date/time (survives deep sleep and poweroff via AXP LDO1)
+- `isClockIntegrityGuaranteed()` (the VL flag) is the honest "is this time
+  trustworthy?" test — it latches false only if the oscillator ever stopped.
+  `main/rtc.cpp` restores the system clock from it at boot, so a normal boot
+  needs **no GPS at all**; GPS sets the clock only when this returns false
+  (first-ever boot / drained backup rail), and any GPS sync is written back
 - Alarm (min/hour/day/weekday) + countdown timer, both → IRQ on GPIO37
   (= deep-sleep wake source for scheduled events, e.g. hourly sensor sync)
 - CLKOUT output exists but is unused on this board
@@ -207,6 +212,20 @@ software for power (section 9).
 - Standby via WAKEUP pin (GPIO33) for short pauses; LDO4 off for real off
 - Low-power periodic/standby modes configurable via serial commands
 - Cold-start fix takes ~30 s+ outdoors; keep LDO4 on until fix, then decide
+
+**BLE scanning — what you can actually expect to see**
+- Scan **ACTIVE** (`params.passive = 0`), not passive: most devices advertise
+  only service UUIDs and put their name in the SCAN_RSP, which is sent only in
+  reply to a SCAN_REQ. A passive scan therefore lists nearly everything as a
+  bare MAC.
+- Even then, **most nearby devices legitimately have no name.** Phones and
+  wearables use address privacy (random addresses — a first octet whose top
+  bits are not `11`) and deliberately omit their name to resist tracking. This
+  is correct BLE behaviour, not a bug in the scanner.
+- They usually still send manufacturer data, so `blescan.cpp` falls back to the
+  Bluetooth SIG company ID (`~Apple`, `~Samsung`, …). The leading `~` marks an
+  inferred label, never a name the device actually advertised; a real name from
+  a later SCAN_RSP always supersedes it.
 
 **IR emitter (GPIO2)**
 - Transmit-only (no receiver): NEC/RC5/raw remote-control codes via RMT carrier
@@ -522,14 +541,14 @@ Views/logic NEVER touch AXP202, I2C devices, UART, or radios directly. Services 
 - Services communicate upward by POSTING EVENTS (MotionService → WRIST_TILT → UI task
   → screen wake). Services never call into views.
 
-### Where state lives — RTC memory vs NVS (flash)
-Two persistence tiers, and picking the wrong one is a silent bug:
-| | RTC memory (`RTC_DATA_ATTR`) | NVS (flash) |
-|---|---|---|
-| Survives | deep sleep, SW reset | everything, incl. full power-off / battery pull |
-| Cost | free (8 KB slow domain) | flash wear, ~ms writes |
-| Use for | **caches** that are cheap to re-derive | **user settings** that must never be lost |
-| In use | GPS-derived timezone offset (`time_sync.cpp`) — re-derivable from a fix | backlight brightness (`settings.cpp`) |
+### Where state lives — RTC memory vs PCF8563 vs NVS
+Three persistence tiers, and picking the wrong one is a silent bug:
+| | RTC memory (`RTC_DATA_ATTR`) | PCF8563 (RTC chip) | NVS (flash) |
+|---|---|---|---|
+| Survives | deep sleep, SW reset | everything (battery-backed via LDO1) | everything, incl. battery pull |
+| Cost | free (8 KB slow domain) | an I2C write | flash wear, ~ms writes |
+| Use for | **caches** cheap to re-derive | **wall-clock time**, and only that | **user settings** that must never be lost |
+| In use | GPS-derived timezone offset (`time_sync.cpp`) — re-derivable from a fix | system time (`rtc.cpp`) | backlight brightness (`settings.cpp`) |
 Rule: if losing it merely costs a re-derivation, RTC memory; if losing it would
 surprise the user, NVS. Never put a user-visible setting in RTC memory only —
 it comes back as the default after the battery dies.
@@ -646,12 +665,12 @@ turns it back off).
 ### Peripheral gating — who turns what off, and when
 | Peripheral | Off mechanism | Off when |
 |---|---|---|
-| **GPS (biggest consumer)** | AXP202 **LDO4 off**; for short pauses hold WAKEUP (GPIO33) low = standby | any time a fix is not actively being acquired |
+| **GPS (biggest consumer)** | AXP202 **LDO4 off**; for short pauses hold WAKEUP (GPIO33) low = standby | any time a fix is not actively being acquired. **Notably NOT at boot** — the PCF8563 supplies the time, so the receiver is powered only while the GPS view is focused. Timezone derivation likewise happens only during such a session (`time_sync_feed_gps`), never on the boot path |
 | Backlight | LDO2 off; dim first by lowering LDO2 voltage | screen timeout (default 10 s without touch) |
 | Panel | `lcd.sleep()` (ST7789 sleep-in); for long idle also **LDO3 off** | after backlight off; LDO3 off ⇒ full section-3 re-init on wake |
 | Touch | powered by LDO3 → dies with panel (that's fine: no screen = no touch) | with display |
 | WiFi | `esp_wifi_stop()` + `esp_wifi_deinit()` | immediately after each sync/fetch — never leave STA idling. Implemented pattern (`main/wifiscan.cpp`): a background task does init → `WIFI_MODE_STA` → start → blocking scan → read records → stop → deinit, so the radio is up only for the ~2 s the scan takes. Results are a static snapshot; refreshing means running the whole cycle again |
-| BT/BLE | controller disable + deinit | whenever no active BLE session. **NimBLE, BLE-only mode** (`CONFIG_BT_NIMBLE_ENABLED`, `CONFIG_BTDM_CTRL_MODE_BLE_ONLY`) — no classic BR/EDR is ever needed here, and NimBLE costs far less RAM/flash than Bluedroid. Implemented pattern (`main/blescan.cpp`): `nimble_port_init()` → host task → bounded `ble_gap_disc()` window (4 s, passive) → `nimble_port_stop()` + `nimble_port_deinit()`. The `esp_bt_controller_mem_release()`-at-boot trick NO LONGER APPLIES — the controller is used, just kept down between scans. Verified 2026-08-25: repeated init/deinit cycles do not leak (internal heap 180263 B after 1 cycle vs 180131 B after 3) |
+| BT/BLE | controller disable + deinit | whenever no active BLE session. **NimBLE, BLE-only mode** (`CONFIG_BT_NIMBLE_ENABLED`, `CONFIG_BTDM_CTRL_MODE_BLE_ONLY`) — no classic BR/EDR is ever needed here, and NimBLE costs far less RAM/flash than Bluedroid. Implemented pattern (`main/blescan.cpp`): `nimble_port_init()` → host task → bounded `ble_gap_disc()` window (4 s, ACTIVE — see below) → `nimble_port_stop()` + `nimble_port_deinit()`. The `esp_bt_controller_mem_release()`-at-boot trick NO LONGER APPLIES — the controller is used, just kept down between scans. Verified 2026-08-25: repeated init/deinit cycles do not leak (internal heap 180263 B after 1 cycle vs 180131 B after 3) |
 | DRV2605 | standby bit via SensorLib | between effects, always |
 | IR LED / RMT | RMT channel disable | after send |
 | **BMA423** | **stays ON** (µA-range) — it is the wake source (tilt / double-tap) | never |

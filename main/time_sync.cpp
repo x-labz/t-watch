@@ -1,5 +1,5 @@
 #include "time_sync.h"
-#include "gps.h"
+#include "rtc.h"
 
 #include <atomic>
 #include <cmath>
@@ -8,26 +8,22 @@
 
 #include "esp_attr.h"
 #include "esp_log.h"
-#include "esp_timer.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 
 static const char *TAG = "TIMESYNC";
 
-static constexpr int64_t kSyncTimeoutUs = 3LL * 60 * 1000000; // give up after 3 min
-
-// Survives resets that keep the RTC domain powered (software resets,
-// watchdog resets, deep sleep) but NOT a full power loss — same caveat as
-// any RTC_DATA_ATTR variable. Only the timezone is cached here, not wall
-// time itself: there's no battery-backed RTC chip (PCF8563) wired up yet
-// per CLAUDE.md section 6, so actual time still needs a fresh GPS sync
-// every boot, but the timezone rarely changes and is worth remembering.
+// Survives resets that keep the RTC domain powered (software resets, watchdog
+// resets, deep sleep) but NOT a full power loss. Only the timezone lives here:
+// it is cheap to re-derive from a fix, which is exactly what RTC memory is for
+// (CLAUDE.md section 6). Wall time itself belongs in the PCF8563, which is
+// battery-backed and survives everything.
 #define RTC_TZ_MAGIC 0x545A4F46u   // "TZOF"
 RTC_DATA_ATTR static uint32_t s_rtc_tz_magic;
 RTC_DATA_ATTR static int32_t s_rtc_tz_offset_sec;
 
-static std::atomic<bool> s_in_progress{false};
-static std::atomic<int32_t> s_utc_offset_sec{3600};   // placeholder until phase 1 knows the real date
+static std::atomic<bool> s_clock_unset{true};
+static std::atomic<int32_t> s_utc_offset_sec{3600};
+static std::atomic<bool> s_tz_known{false};
+static std::atomic<bool> s_gps_session{false};
 
 // Days-since-1970-01-01 for a proleptic Gregorian date (Howard Hinnant's
 // well-known constant-time algorithm) — avoids depending on timegm(), which
@@ -75,91 +71,91 @@ static int32_t hungary_default_offset_now(void)
     return dst ? 7200 : 3600;
 }
 
-static void time_sync_task(void *)
+void time_sync_init(void)
 {
-    bool have_cached_tz = (s_rtc_tz_magic == RTC_TZ_MAGIC);
-    if (have_cached_tz) {
+    if (s_rtc_tz_magic == RTC_TZ_MAGIC) {
         s_utc_offset_sec.store(s_rtc_tz_offset_sec, std::memory_order_relaxed);
-        ESP_LOGI(TAG, "using timezone cached in RTC memory: utc_offset=%ld s",
-                 (long)s_rtc_tz_offset_sec);
+        s_tz_known.store(true, std::memory_order_relaxed);
+        ESP_LOGI(TAG, "timezone from RTC-memory cache: utc_offset=%ld s", (long)s_rtc_tz_offset_sec);
     }
 
-    gps_acquire();
-    int64_t t0 = esp_timer_get_time();
-    bool time_set = false;
-    bool tz_set = have_cached_tz;
-
-    // Two independent phases: date/time from $RMC's navigation message
-    // arrives well before a full position fix, so the clock gets set (and
-    // the blinking indicator stops) as soon as phase 1 lands — timezone
-    // refinement from longitude happens later, silently, once a fix
-    // actually arrives, without holding the clock hostage to it.
-    while ((!time_set || !tz_set) && (esp_timer_get_time() - t0) < kSyncTimeoutUs) {
-        GpsReading r = gps_read();
-
-        if (!time_set && r.has_date_time) {
-            int64_t days = days_from_civil(2000 + r.date_year, r.date_month, r.date_day);
-            time_t epoch = (time_t)(days * 86400 + r.utc_hh * 3600 + r.utc_mm * 60 + r.utc_ss);
-
-            struct timeval tv;
-            tv.tv_sec = epoch;
-            tv.tv_usec = 0;
-            settimeofday(&tv, nullptr);
-
-            ESP_LOGI(TAG, "phase 1 (time) synced: 20%02u-%02u-%02u %02u:%02u:%02u UTC",
-                     r.date_year, r.date_month, r.date_day, r.utc_hh, r.utc_mm, r.utc_ss);
-            time_set = true;
-            s_in_progress.store(false, std::memory_order_relaxed);
-
-            // No real fix yet to compute a real timezone from — refresh the
-            // Hungary default now that the real date is known, so at least
-            // DST is accounted for instead of a static UTC+1 guess.
-            if (!have_cached_tz) {
-                s_utc_offset_sec.store(hungary_default_offset_now(), std::memory_order_relaxed);
-            }
+    // The PCF8563 is the normal source of wall time — no GPS, no waiting.
+    if (rtc_restore_system_time() == ESP_OK) {
+        s_clock_unset.store(false, std::memory_order_relaxed);
+        if (!s_tz_known.load(std::memory_order_relaxed)) {
+            // Now that the real date is known, the Hungary default can at
+            // least get DST right instead of assuming a flat UTC+1.
+            s_utc_offset_sec.store(hungary_default_offset_now(), std::memory_order_relaxed);
         }
-
-        if (!tz_set && r.has_fix && (r.latitude != 0 || r.longitude != 0)) {
-            int32_t offset = timezone_from_longitude(r.longitude);
-            s_utc_offset_sec.store(offset, std::memory_order_relaxed);
-            s_rtc_tz_offset_sec = offset;
-            s_rtc_tz_magic = RTC_TZ_MAGIC;
-            ESP_LOGI(TAG, "phase 2 (timezone) synced: utc_offset=%ld s (lon=%.3f), cached to RTC memory",
-                     (long)offset, r.longitude);
-            tz_set = true;
-        }
-
-        if (!time_set || !tz_set) {
-            vTaskDelay(pdMS_TO_TICKS(500));
-        }
+        ESP_LOGI(TAG, "clock ready from RTC — GPS not needed at boot");
+    } else {
+        ESP_LOGW(TAG, "no trustworthy RTC time — open the GPS view to set the clock");
     }
-
-    if (!time_set) {
-        ESP_LOGW(TAG, "phase 1 (time) gave up after %lld s — no GPS date/time ever arrived",
-                 (long long)(kSyncTimeoutUs / 1000000));
-        s_in_progress.store(false, std::memory_order_relaxed);
-    }
-    if (!tz_set) {
-        ESP_LOGW(TAG, "phase 2 (timezone) gave up after %lld s — no GPS fix ever arrived (keeping Hungary default)",
-                 (long long)(kSyncTimeoutUs / 1000000));
-    }
-
-    gps_release();
-    vTaskDelete(nullptr);
 }
 
-void time_sync_start(void)
+void time_sync_gps_session_begin(void)
 {
-    s_in_progress.store(true, std::memory_order_relaxed);
-    xTaskCreate(time_sync_task, "time_sync", 4096, nullptr, 4, nullptr);
+    s_gps_session.store(true, std::memory_order_relaxed);
+}
+
+void time_sync_gps_session_end(void)
+{
+    s_gps_session.store(false, std::memory_order_relaxed);
+}
+
+void time_sync_feed_gps(const GpsReading &r)
+{
+    // Only ever set the clock when nothing trustworthy has it. On a healthy
+    // watch this never runs: the PCF8563 already supplied the time at boot.
+    if (s_clock_unset.load(std::memory_order_relaxed) && r.has_date_time) {
+        int64_t days = days_from_civil(2000 + r.date_year, r.date_month, r.date_day);
+        time_t epoch = (time_t)(days * 86400 + r.utc_hh * 3600 + r.utc_mm * 60 + r.utc_ss);
+
+        struct timeval tv = {};
+        tv.tv_sec = epoch;
+        settimeofday(&tv, nullptr);
+        s_clock_unset.store(false, std::memory_order_relaxed);
+
+        ESP_LOGI(TAG, "clock set from GPS: 20%02u-%02u-%02u %02u:%02u:%02u UTC",
+                 r.date_year, r.date_month, r.date_day, r.utc_hh, r.utc_mm, r.utc_ss);
+
+        // Persist it so no future boot has to wait for GPS again.
+        rtc_store_utc(epoch);
+
+        if (!s_tz_known.load(std::memory_order_relaxed)) {
+            s_utc_offset_sec.store(hungary_default_offset_now(), std::memory_order_relaxed);
+        }
+    }
+
+    // Timezone refinement needs an actual position, which is why it only
+    // happens here — while the GPS view is open and the receiver is powered.
+    if (!s_tz_known.load(std::memory_order_relaxed) && r.has_fix &&
+        (r.latitude != 0 || r.longitude != 0)) {
+        int32_t offset = timezone_from_longitude(r.longitude);
+        s_utc_offset_sec.store(offset, std::memory_order_relaxed);
+        s_rtc_tz_offset_sec = offset;
+        s_rtc_tz_magic = RTC_TZ_MAGIC;
+        s_tz_known.store(true, std::memory_order_relaxed);
+        ESP_LOGI(TAG, "timezone acquired from fix: utc_offset=%+ld h (lat=%.4f lon=%.4f), cached to RTC memory",
+                 (long)(offset / 3600), r.latitude, r.longitude);
+    }
 }
 
 bool time_sync_in_progress(void)
 {
-    return s_in_progress.load(std::memory_order_relaxed);
+    return s_clock_unset.load(std::memory_order_relaxed);
 }
 
 int32_t time_sync_get_utc_offset_seconds(void)
 {
     return s_utc_offset_sec.load(std::memory_order_relaxed);
+}
+
+TzStatus time_sync_tz_status(void)
+{
+    if (s_tz_known.load(std::memory_order_relaxed)) {
+        return TzStatus::ACQUIRED;
+    }
+    return s_gps_session.load(std::memory_order_relaxed) ? TzStatus::WAITING_FOR_FIX
+                                                         : TzStatus::CACHED;
 }

@@ -49,4 +49,30 @@ void render_gps(LGFX_Sprite &fb, const GpsVM &vm)
     fb.setTextColor(TFT_YELLOW, TFT_BLACK);
     snprintf(buf, sizeof(buf), "NMEA msgs: %lu", (unsigned long)vm.sentence_count);
     fb.drawString(buf, fb.width() / 2, 190);
+
+    // Timezone is derived here rather than at boot, so this view is where the
+    // user finds out whether that has happened yet.
+    char tzbuf[48];
+    int hrs = (int)(vm.utc_offset_sec / 3600);
+    int mins = (int)((vm.utc_offset_sec % 3600) / 60);
+    if (mins < 0) mins = -mins;
+    switch (vm.tz_status) {
+        case GpsTzVM::ACQUIRED:
+            fb.setTextColor(TFT_GREEN, TFT_BLACK);
+            snprintf(tzbuf, sizeof(tzbuf), "TZ ACQUIRED  UTC%+d:%02d", hrs, mins);
+            break;
+        case GpsTzVM::WAITING_FOR_FIX:
+            fb.setTextColor(TFT_YELLOW, TFT_BLACK);
+            snprintf(tzbuf, sizeof(tzbuf), "TZ: waiting for fix (UTC%+d:%02d)", hrs, mins);
+            break;
+        default:
+            fb.setTextColor(TFT_DARKGREY, TFT_BLACK);
+            snprintf(tzbuf, sizeof(tzbuf), "TZ cached  UTC%+d:%02d", hrs, mins);
+            break;
+    }
+    fb.drawString(tzbuf, fb.width() / 2, 204);
+
+    fb.setTextColor(vm.clock_set ? TFT_DARKGREY : TFT_RED, TFT_BLACK);
+    fb.drawString(vm.clock_set ? "clock: set (RTC)" : "clock: UNSET - needs fix",
+                  fb.width() / 2, 218);
 }

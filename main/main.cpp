@@ -1,6 +1,7 @@
 #include "esp_log.h"
 #include "debug_console.h"
 #include "power.h"
+#include "rtc.h"
 #include "lgfx_twatch_v2.hpp"
 #include "touch.h"
 #include "gps.h"
@@ -55,6 +56,14 @@ extern "C" void app_main(void)
     }
     ESP_LOGI(TAG, "gps_init() OK");
 
+    // PCF8563 is the normal source of wall time; with it the watch no longer
+    // powers the GPS at boot just to learn what time it is (CLAUDE.md s9).
+    if (rtc_init() != ESP_OK) {
+        ESP_LOGW(TAG, "rtc_init() failed — clock will need a GPS sync");
+    } else {
+        ESP_LOGI(TAG, "rtc_init() OK");
+    }
+
     if (tilt_init() != ESP_OK) {
         ESP_LOGE(TAG, "tilt_init() failed");
         return;
@@ -67,8 +76,8 @@ extern "C" void app_main(void)
     }
     ESP_LOGI(TAG, "haptic_init() OK");
 
-    time_sync_start();
-    ESP_LOGI(TAG, "time_sync_start() — starting UI task");
+    time_sync_init();
+    ESP_LOGI(TAG, "time_sync_init() — starting UI task");
 
     ui_task_start(lcd);
 }
