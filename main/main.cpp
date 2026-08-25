@@ -1,10 +1,12 @@
 #include "esp_log.h"
+#include "debug_console.h"
 #include "power.h"
 #include "lgfx_twatch_v2.hpp"
 #include "touch.h"
 #include "gps.h"
 #include "tilt.h"
 #include "haptic.h"
+#include "settings.h"
 #include "time_sync.h"
 #include "ui_task.h"
 
@@ -14,6 +16,8 @@ static LGFX_TWatch2020V2 lcd;
 extern "C" void app_main(void)
 {
     ESP_LOGI(TAG, "twatch firmware boot stub");
+
+    debug_console_start();
 
     if (power_init() != ESP_OK) {
         ESP_LOGE(TAG, "power_init() failed — PMU not ready, aborting bring-up");
@@ -25,12 +29,18 @@ extern "C" void app_main(void)
     ESP_LOGI(TAG, "battery: connected=%d percent=%d voltage_mv=%u charging=%d vbus_in=%d",
              batt.battery_connected, batt.percent, batt.voltage_mv, batt.charging, batt.vbus_in);
 
+    if (settings_init() != ESP_OK) {
+        ESP_LOGE(TAG, "settings_init() failed");
+        return;
+    }
+    ESP_LOGI(TAG, "settings_init() OK");
+
     // lcd.init() only runs after power_init() has sequenced LDO3/LDO2/EXTEN.
     if (!lcd.init()) {
         ESP_LOGE(TAG, "lcd.init() failed");
         return;
     }
-    lcd.setBrightness(255);
+    lcd.setBrightness(settings_get_brightness());
     ESP_LOGI(TAG, "lcd.init() OK");
 
     if (touch_init() != ESP_OK) {

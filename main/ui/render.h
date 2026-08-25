@@ -13,3 +13,5 @@ void render_battery(LGFX_Sprite &fb, const BatteryVM &vm);
 void render_gps(LGFX_Sprite &fb, const GpsVM &vm);
 void render_tilt(LGFX_Sprite &fb, const TiltVM &vm);
 void render_haptic(LGFX_Sprite &fb, const HapticVM &vm);
+void render_settings(LGFX_Sprite &fb, const SettingsVM &vm);
+void render_wifi(LGFX_Sprite &fb, const WifiVM &vm);

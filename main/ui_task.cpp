@@ -1,6 +1,7 @@
 #include "ui_task.h"
 
 #include <atomic>
+#include <cstring>
 #include <ctime>
 #include <utility>
 
@@ -10,15 +11,18 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "debug_console.h"
 #include "gps.h"
 #include "haptic.h"
 #include "power.h"
+#include "settings.h"
 #include "tilt.h"
 #include "time_sync.h"
 #include "touch.h"
 #include "ui/render.h"
 #include "ui/view.h"
 #include "ui/viewmodels.h"
+#include "wifiscan.h"
 
 static const char *TAG = "UI";
 
@@ -29,6 +33,8 @@ static constexpr int32_t kSwipeThresholdPx = 40;
 static constexpr int64_t kSwipeDurationUs = 200000;
 static constexpr uint32_t kTiltRefreshUs = 66000;   // ~15 Hz while TILT is focused
 static constexpr uint16_t kHapticEffectMax = 123;   // DRV2605 ROM library size (CLAUDE.md section 2)
+static constexpr int32_t kBrightnessStep = 26;       // ~10% of 255 per tap
+static constexpr int32_t kBrightnessMin = 26;        // keep the screen from going fully dark
 
 static std::atomic<bool> s_tick_pending{false};
 static std::atomic<bool> s_tilt_tick_pending{false};
@@ -85,6 +91,18 @@ static TiltVM to_tilt_vm(const TiltReading &r)
     return vm;
 }
 
+static WifiVM to_wifi_vm(const WifiScanResult &r)
+{
+    WifiVM vm;
+    vm.scanning = r.scanning;
+    vm.count = r.count;
+    for (uint8_t i = 0; i < r.count && i < 10; i++) {
+        strncpy(vm.aps[i].ssid, r.aps[i].ssid, sizeof(vm.aps[i].ssid) - 1);
+        vm.aps[i].rssi = r.aps[i].rssi;
+    }
+    return vm;
+}
+
 static const char *view_name(ViewId id)
 {
     switch (id) {
@@ -93,12 +111,15 @@ static const char *view_name(ViewId id)
         case ViewId::GPS: return "GPS";
         case ViewId::TILT: return "TILT";
         case ViewId::HAPTIC: return "HAPTIC";
+        case ViewId::SETTINGS: return "SETTINGS";
+        case ViewId::WIFI: return "WIFI";
         default: return "?";
     }
 }
 
 static void render_view(ViewId id, LGFX_Sprite &frame, const WatchfaceVM &wf, const BatteryVM &batt,
-                         const GpsVM &gps, const TiltVM &tilt, const HapticVM &haptic)
+                         const GpsVM &gps, const TiltVM &tilt, const HapticVM &haptic,
+                         const SettingsVM &settings, const WifiVM &wifi)
 {
     switch (id) {
         case ViewId::WATCHFACE: render_watchface(frame, wf); break;
@@ -106,6 +127,8 @@ static void render_view(ViewId id, LGFX_Sprite &frame, const WatchfaceVM &wf, co
         case ViewId::GPS: render_gps(frame, gps); break;
         case ViewId::TILT: render_tilt(frame, tilt); break;
         case ViewId::HAPTIC: render_haptic(frame, haptic); break;
+        case ViewId::SETTINGS: render_settings(frame, settings); break;
+        case ViewId::WIFI: render_wifi(frame, wifi); break;
         default: break;
     }
 }
@@ -218,14 +241,115 @@ static void ui_task_fn(void *arg)
     GpsVM gps = to_gps_vm(gps_read());
     TiltVM tilt = to_tilt_vm(tilt_read());
     HapticVM haptic{};
+    int32_t brightness = settings_get_brightness();
+    SettingsVM settings;
+    settings.brightness_pct = (uint8_t)(((uint32_t)brightness * 100 + 127) / 255);
+    WifiVM wifi = to_wifi_vm(wifi_scan_read());
 
-    render_view(current, *frame_cur, wf, batt, gps, tilt, haptic);
-    push_frame_locked(lcd, *frame_cur, pm_lock);
+    auto redraw = [&]() {
+        render_view(current, *frame_cur, wf, batt, gps, tilt, haptic, settings, wifi);
+        push_frame_locked(lcd, *frame_cur, pm_lock);
+    };
+
+    // Shared by physical swipes and the debug-console "view"/"next"/"prev"
+    // commands, so both paths exercise identical view-transition logic.
+    auto switch_view = [&](ViewId next, bool to_enters_from_right) {
+        if (next == current) return;
+        if (next == ViewId::TILT) {
+            tilt = to_tilt_vm(tilt_read());
+        }
+        if (next == ViewId::WIFI) {
+            wifi_scan_start();
+            wifi = to_wifi_vm(wifi_scan_read());
+        }
+        render_view(next, *frame_other, wf, batt, gps, tilt, haptic, settings, wifi);
+        animate_swipe(lcd, *frame_cur, *frame_other, to_enters_from_right, strips, pm_lock);
+
+        // GPS is the single biggest power draw on this board (CLAUDE.md
+        // section 9) — only powered while its view is actually focused.
+        if (current == ViewId::GPS) gps_release();
+        if (next == ViewId::GPS) gps_acquire();
+
+        current = next;
+        std::swap(frame_cur, frame_other);
+        ESP_LOGI(TAG, "view -> %s", view_name(current));
+    };
+
+    // Shared by physical taps and the debug-console "tap" command.
+    // screen_x is already mirror-corrected (see the swipe-direction comment
+    // at the physical-touch call site).
+    auto do_tap = [&](int32_t screen_x) {
+        bool right_half = screen_x >= (kScreenW / 2);
+        if (current == ViewId::HAPTIC) {
+            if (right_half) {
+                haptic.effect_id = (haptic.effect_id % kHapticEffectMax) + 1;
+            } else {
+                haptic.effect_id = (haptic.effect_id == 1) ? kHapticEffectMax : haptic.effect_id - 1;
+            }
+            haptic_play(haptic.effect_id);
+            ESP_LOGI(TAG, "haptic effect -> %u", haptic.effect_id);
+            redraw();
+        } else if (current == ViewId::SETTINGS) {
+            brightness += right_half ? kBrightnessStep : -kBrightnessStep;
+            if (brightness < kBrightnessMin) brightness = kBrightnessMin;
+            if (brightness > 255) brightness = 255;
+
+            lcd.setBrightness((uint8_t)brightness);
+            settings_set_brightness((uint8_t)brightness);
+            settings.brightness_pct = (uint8_t)(((uint32_t)brightness * 100 + 127) / 255);
+            ESP_LOGI(TAG, "brightness -> %ld (%u%%)", (long)brightness, settings.brightness_pct);
+            redraw();
+        } else if (current == ViewId::WIFI) {
+            // Any tap on the WIFI view re-scans (CLAUDE.md section 9:
+            // wifi_scan_start() tears STA fully down when it finishes, so
+            // this never leaves the radio idling between taps).
+            wifi_scan_start();
+            wifi = to_wifi_vm(wifi_scan_read());
+            ESP_LOGI(TAG, "wifi rescan requested");
+            redraw();
+        }
+    };
+
+    redraw();
 
     bool touching = false;
     int32_t start_x = 0, start_y = 0, last_x = 0, last_y = 0;
 
     for (;;) {
+        DebugCmd dbg;
+        while (debug_console_poll(&dbg)) {
+            switch (dbg.type) {
+                case DebugCmdType::GOTO_VIEW: {
+                    ViewId next = static_cast<ViewId>(dbg.view_index);
+                    bool forward = dbg.view_index > static_cast<uint8_t>(current);
+                    switch_view(next, forward);
+                    break;
+                }
+                case DebugCmdType::NEXT_VIEW: {
+                    uint8_t idx = static_cast<uint8_t>(current);
+                    if (idx + 1 < static_cast<uint8_t>(ViewId::COUNT)) {
+                        switch_view(static_cast<ViewId>(idx + 1), true);
+                    }
+                    break;
+                }
+                case DebugCmdType::PREV_VIEW: {
+                    uint8_t idx = static_cast<uint8_t>(current);
+                    if (idx > 0) {
+                        switch_view(static_cast<ViewId>(idx - 1), false);
+                    }
+                    break;
+                }
+                case DebugCmdType::TAP:
+                    do_tap(dbg.tap_x);
+                    break;
+                case DebugCmdType::STATUS:
+                    ESP_LOGI(TAG, "status: view=%s wifi_scanning=%d wifi_count=%u brightness=%ld",
+                             view_name(current), (int)wifi.scanning, wifi.count, (long)brightness);
+                    break;
+                default: break;
+            }
+        }
+
         if (s_tick_pending.exchange(false, std::memory_order_relaxed)) {
             // Before a GPS fix syncs the clock, time(nullptr) just counts up
             // from the epoch since boot — same visual behavior the old
@@ -239,15 +363,14 @@ static void ui_task_fn(void *arg)
             batt = to_battery_vm(power_read_battery());
             gps = to_gps_vm(gps_read());
             tilt = to_tilt_vm(tilt_read());
+            if (current == ViewId::WIFI) wifi = to_wifi_vm(wifi_scan_read());
 
-            render_view(current, *frame_cur, wf, batt, gps, tilt, haptic);
-            push_frame_locked(lcd, *frame_cur, pm_lock);
+            redraw();
         }
 
         if (s_tilt_tick_pending.exchange(false, std::memory_order_relaxed) && current == ViewId::TILT) {
             tilt = to_tilt_vm(tilt_read());
-            render_view(current, *frame_cur, wf, batt, gps, tilt, haptic);
-            push_frame_locked(lcd, *frame_cur, pm_lock);
+            redraw();
         }
 
         int32_t x = 0, y = 0;
@@ -281,43 +404,14 @@ static void ui_task_fn(void *arg)
                     next_idx = idx - 1;
                 }
                 ViewId next = static_cast<ViewId>(next_idx);
-
-                if (next != current) {
-                    if (next == ViewId::TILT) {
-                        tilt = to_tilt_vm(tilt_read());
-                    }
-                    render_view(next, *frame_other, wf, batt, gps, tilt, haptic);
-                    animate_swipe(lcd, *frame_cur, *frame_other, to_enters_from_right, strips, pm_lock);
-
-                    // GPS is the single biggest power draw on this board
-                    // (CLAUDE.md section 9) — only powered while its view is
-                    // actually focused.
-                    if (current == ViewId::GPS) gps_release();
-                    if (next == ViewId::GPS) gps_acquire();
-
-                    current = next;
-                    std::swap(frame_cur, frame_other);
-                    ESP_LOGI(TAG, "view -> %s (dx=%d dy=%d) batt: connected=%d pct=%d mv=%u chg=%d vbus=%d wf=%02u:%02u:%02u",
-                             view_name(current), (int)dx, (int)dy,
-                             batt.battery_connected, batt.percent, batt.voltage_mv, batt.charging, batt.vbus_in,
-                             wf.hh, wf.mm, wf.ss);
-                }
-            } else if (current == ViewId::HAPTIC) {
+                switch_view(next, to_enters_from_right);
+            } else if (current == ViewId::HAPTIC || current == ViewId::SETTINGS || current == ViewId::WIFI) {
                 // Small displacement = a tap, not a swipe. This unit's touch
                 // panel reports X mirrored relative to the display (see the
                 // swipe-direction fix above), so undo that for absolute
                 // hit-testing too, not just the relative dx sign.
                 int32_t screen_x = (kScreenW - 1) - last_x;
-                bool right_half = screen_x >= (kScreenW / 2);
-                if (right_half) {
-                    haptic.effect_id = (haptic.effect_id % kHapticEffectMax) + 1;
-                } else {
-                    haptic.effect_id = (haptic.effect_id == 1) ? kHapticEffectMax : haptic.effect_id - 1;
-                }
-                haptic_play(haptic.effect_id);
-                ESP_LOGI(TAG, "haptic effect -> %u", haptic.effect_id);
-                render_view(current, *frame_cur, wf, batt, gps, tilt, haptic);
-                push_frame_locked(lcd, *frame_cur, pm_lock);
+                do_tap(screen_x);
             }
         }
 

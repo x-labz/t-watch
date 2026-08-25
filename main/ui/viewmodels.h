@@ -41,3 +41,18 @@ struct TiltVM {
 struct HapticVM {
     uint16_t effect_id = 1;
 };
+
+struct SettingsVM {
+    uint8_t brightness_pct = 100;   // 0-100, for display only
+};
+
+struct WifiApVM {
+    char ssid[33] = {0};
+    int8_t rssi = 0;
+};
+
+struct WifiVM {
+    bool scanning = false;
+    uint8_t count = 0;
+    WifiApVM aps[10];
+};
