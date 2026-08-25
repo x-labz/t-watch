@@ -34,6 +34,10 @@ static constexpr uint8_t kMonitorTimeDefault = 0x0A;
 static constexpr uint8_t kMonitorPeriodDefault = 0x28;
 
 static constexpr uint32_t kAutoRecoverAfterErrors = 250;   // ~5 s at the 50 Hz poll rate
+// Bounded: if the controller is genuinely absent, retrying forever just spams
+// the log and stalls the UI loop every few seconds for no benefit.
+static constexpr int kMaxAutoRecoveries = 5;
+static int s_recover_attempts = 0;
 
 static esp_err_t add_device(void)
 {
@@ -74,7 +78,7 @@ static void configure_chip(void)
     }
 }
 
-esp_err_t touch_init(void)
+static esp_err_t create_bus(void)
 {
     i2c_master_bus_config_t bus_cfg = {};
     bus_cfg.i2c_port = TWATCH_I2C1_PORT;
@@ -87,6 +91,14 @@ esp_err_t touch_init(void)
     esp_err_t err = i2c_new_master_bus(&bus_cfg, &s_bus);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "i2c bus1 init failed: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
+esp_err_t touch_init(void)
+{
+    esp_err_t err = create_bus();
+    if (err != ESP_OK) {
         return err;
     }
     err = add_device();
@@ -129,13 +141,19 @@ bool touch_read(int32_t *x, int32_t *y)
         // on its own, and previously that left the watch looking permanently
         // frozen with no way back short of reflashing. Retry periodically
         // rather than once, since the first reset does not always take.
-        if (n % kAutoRecoverAfterErrors == 0) {
+        if (n % kAutoRecoverAfterErrors == 0 && s_recover_attempts < kMaxAutoRecoveries) {
+            s_recover_attempts++;
             touch_recover();
+            if (s_recover_attempts == kMaxAutoRecoveries) {
+                ESP_LOGE(TAG, "touch did not come back after %d recovery attempts — "
+                              "giving up (use `touchfix` to retry manually)", kMaxAutoRecoveries);
+            }
         }
         return false;
     }
     if (s_err_count.exchange(0, std::memory_order_relaxed) != 0) {
         ESP_LOGI(TAG, "i2c reads recovered");
+        s_recover_attempts = 0;
     }
 
     uint8_t points = buf[0];
@@ -231,15 +249,30 @@ esp_err_t touch_force_deepsleep(void)
 
 esp_err_t touch_recover(void)
 {
-    ESP_LOGW(TAG, "recovering FT6336: LDO3 power-cycle + EXTEN reset + re-add device");
+    // Deliberately does NOT power-cycle LDO3. That rail also feeds the panel,
+    // which has no reset pin, so cutting it corrupts the display until a full
+    // lcd.init() — unacceptable for something that runs automatically every
+    // few seconds. EXTEN is the FT6336's documented reset and is enough on its
+    // own; the I2C bus is rebuilt too because a controller that dropped off
+    // mid-transaction can leave the master's state machine wedged, which is
+    // what ESP_ERR_INVALID_STATE indicates.
+    ESP_LOGW(TAG, "recovering FT6336: EXTEN reset + I2C bus rebuild");
     if (s_dev != nullptr) {
         i2c_master_bus_rm_device(s_dev);
         s_dev = nullptr;
     }
-    // EXTEN alone was not enough on this unit, so go all the way to a rail
-    // power-cycle (which also resets the panel — it shares LDO3).
-    power_cycle_ldo3();
-    esp_err_t err = add_device();
+    if (s_bus != nullptr) {
+        i2c_del_master_bus(s_bus);
+        s_bus = nullptr;
+    }
+    power_touch_reset();
+    vTaskDelay(pdMS_TO_TICKS(60));   // controller boot time after reset
+
+    esp_err_t err = create_bus();
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = add_device();
     if (err != ESP_OK) {
         return err;
     }

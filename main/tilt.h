@@ -14,3 +14,7 @@ struct TiltReading {
 esp_err_t tilt_init(void);
 
 TiltReading tilt_read(void);
+
+// False when the BMA423 never came up; tilt_read() then returns zeros rather
+// than stale/garbage data, and the watch runs normally without it.
+bool tilt_available(void);
