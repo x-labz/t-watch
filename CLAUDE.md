@@ -437,8 +437,8 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_QUAD=y
 CONFIG_SPIRAM_SPEED_80M=y
-CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
-CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_40M=y   # NOT 80M — see section 13; 80M boot-loops this unit
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y   # note: IDF downgrades this to DIO when PSRAM is on
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 CONFIG_COMPILER_CXX_EXCEPTIONS=n
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
@@ -671,7 +671,12 @@ Uncomment `lvgl/lvgl: "^9"` in idf_component.yml. Rules if enabled:
 
 **Non-negotiable settings (already in sdkconfig.defaults above):**
 - CPU 240 MHz (`CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y`)
-- PSRAM 80 MHz (`CONFIG_SPIRAM_SPEED_80M=y`), Flash 80 MHz QIO
+- PSRAM and Flash at **40 MHz** (`CONFIG_SPIRAM_SPEED_40M`, `CONFIG_ESPTOOLPY_FLASHFREQ_40M`).
+  80 MHz flash makes this unit boot-loop (section 13) and PSRAM cannot exceed the
+  flash clock. This does NOT affect the display: `freq_write = 80000000` is a
+  different peripheral bus and stays at 80 MHz, so the fps maths below is unchanged.
+  PSRAM only holds the two full-frame sprites (occasional redraws); the 30+fps
+  path is the internal-RAM strip pipeline
 - Compiler optimization: `-O2` (`CONFIG_COMPILER_OPTIMIZATION_PERF=y`)
 
 **Buffer placement — the classic-ESP32 trap:**
@@ -1008,7 +1013,7 @@ tier 3 "is my panel config right?".
 | **Touch reads SUCCEED (0 I2C errors, 0x38 probes OK, registers read sane values) but `0x02` is always 0 — no finger is ever reported** | **Over-configuration, not a fault.** Writing the INT-mode (`0xA4`) / monitor-timing (`0x87`) registers at init leaves the chip healthy-looking but not reporting points to a polling driver (hit 2026-08-25 while "fixing" the DEEPSLEEP bug above — the fix caused this). An EXTEN reset already gives working defaults: force ONLY power mode `0xA5`=0 and write nothing else. Use `touchdump` to compare against the sanity values in section 2 |
 | Watch won't enumerate on USB | Watch powered off (long-press PEK), or dead battery. **Also happens spontaneously mid-session** on this unit — the port simply disappears, and any capture then reads nothing while the watch looks fine. Check `lsusb` for `1a86:55d4` before blaming firmware |
 | Flash fails "Failed to write to target RAM" | Lower baud (460800/115200); check CH340 driver |
-| Flash succeeds but the board boot-loops: `rst:0x10 (RTCWDT_RTC_RESET)` / `csum err` / garbage `load:` addresses | Marginal power delivery on this unit, NOT the firmware — it reproduces on read-only `esptool.py flash_id` and on every build including trivial ones. Just retry the flash (loop it, section 11); it usually takes on the 2nd-3rd attempt. Reseating the battery connector measurably helped (clean first-try boots, and the PMU started reporting `charging=1`) |
+| Board boot-loops: `rst:0x10 (RTCWDT_RTC_RESET)` / `csum err` / `invalid header` / garbage `load:` addresses | **80 MHz flash clock — FIXED 2026-08-25 by dropping to 40 MHz.** Despite months of calling this a "brownout", `rst:0x10` is `RTCWDT_RTC_RESET` (the RTC **watchdog**); the brownout reset is `rst:0x0f` (`RTCWDT_BROWN_OUT_RESET`) and was NEVER seen. The failure is the **ROM bootloader** failing to read flash — `load:` segment 1 succeeds, segment 2 returns `0xffffffff`, boot never completes, watchdog resets. That stage runs before PSRAM and before our code, so no firmware change could ever have caused or fixed it. `clock div:1` in the boot banner = 80 MHz, `div:2` = 40 MHz. Measured: 80 MHz failed roughly half of all attempts; **40 MHz gave 30/30 clean boots**. Espressif's flash-mode docs warn 80 MHz "may cause crashing if the flash or board design is not capable of this speed". Note LilyGO's own firmware ships the same 80 MHz header and boot-looped identically, so this is the unit, not our build |
 | A serial capture is empty / a feature "does nothing" | Do not conclude anything yet — verify the firmware was actually alive for that window (section 11). Port vanished, brownout loop, and idle-silent builds all produce identical empty logs |
 | Permission denied /dev/ttyUSB0 | User not in dialout group |
 | Random reboots when GPS on | Brownout: enable LDO4 only when needed, check battery |

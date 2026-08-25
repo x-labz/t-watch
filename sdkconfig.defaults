@@ -2,8 +2,23 @@ CONFIG_IDF_TARGET="esp32"
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_QUAD=y
-CONFIG_SPIRAM_SPEED_80M=y
-CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+# PSRAM follows the flash clock on ESP32 and cannot exceed it, so dropping
+# flash to 40MHz (below) forces this to 40M regardless of what is asked for
+# here. Stated explicitly so the file does not claim 80M while the build
+# silently uses 40M. Acceptable: PSRAM only holds the two full-frame sprites,
+# which are occasional redraws — the 30+fps path is the internal-RAM strip
+# pipeline (section 8) and is unaffected.
+CONFIG_SPIRAM_SPEED_40M=y
+# Flash at 40MHz, NOT 80MHz. The ROM bootloader reads flash at the configured
+# rate (the boot log's "clock div:1" is 80MHz, div:2 is 40MHz), and at 80MHz
+# this unit intermittently fails that read: the boot log shows segment 1
+# loading then garbage — "load:0xffffffff,len:-1" / "csum err" / "invalid
+# header" — and the RTC watchdog resets the chip (rst:0x10). Espressif's own
+# flash-mode docs say 80MHz "may cause crashing if the flash or board design
+# is not capable of this speed". Measured on hardware, see section 13.
+# This does NOT affect the 80MHz display SPI in section 8 — that is a separate
+# peripheral bus and unchanged.
+CONFIG_ESPTOOLPY_FLASHFREQ_40M=y
 CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 CONFIG_COMPILER_CXX_EXCEPTIONS=n
