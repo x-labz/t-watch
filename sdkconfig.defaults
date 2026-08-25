@@ -45,3 +45,8 @@ CONFIG_BT_NIMBLE_ENABLED=y
 CONFIG_BTDM_CTRL_MODE_BLE_ONLY=y
 CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=n
 CONFIG_BTDM_CTRL_MODE_BTDM=n
+
+# Lets `pmlocks` show where time is actually spent per frequency, which is how
+# section 9's "verify DFS actually engages" check is made. Small overhead on
+# every lock operation; turn off once the power work is settled.
+CONFIG_PM_PROFILING=y

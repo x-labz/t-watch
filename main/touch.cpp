@@ -255,6 +255,33 @@ void touch_monitor_raw(int seconds)
     ESP_LOGW(TAG, "raw monitor done: %d readings reported a touch point", hits);
 }
 
+void touch_sleep(void)
+{
+    // Same register write as the test hook below; separate entry point so the
+    // intent reads as power management rather than fault injection.
+    if (write_reg(kRegPowerMode, 0x03) != ESP_OK) {
+        ESP_LOGW(TAG, "could not put FT6336 to sleep");
+    }
+    s_err_count.store(0, std::memory_order_relaxed);
+}
+
+esp_err_t touch_wake(void)
+{
+    // EXTEN reset is the documented way out of DEEPSLEEP; the chip does not
+    // answer I2C until it has had one, so this cannot be a register write.
+    power_touch_reset();
+    vTaskDelay(pdMS_TO_TICKS(60));   // controller boot time after reset
+    esp_err_t err = touch_probe();
+    if (err == ESP_OK) {
+        configure_chip();
+        s_err_count.store(0, std::memory_order_relaxed);
+        s_recover_attempts = 0;
+    } else {
+        ESP_LOGW(TAG, "touch did not wake: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
 esp_err_t touch_force_deepsleep(void)
 {
     ESP_LOGW(TAG, "forcing FT6336 into DEEPSLEEP (test hook)");

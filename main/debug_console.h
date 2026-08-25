@@ -20,7 +20,14 @@
 //   treg <hex> <hex>          - write an FT6336 register (e.g. `treg A4 0`)
 //   exten 0|1                 - drive the touch reset line; 0 reproduces dead touch
 //   bma                       - diagnose the BMA423 (probe, raw chip id, soft reset)
-//   bmainit                   - re-run the SensorLib BMA423 init now
+//   bmainit                   - re-run the BMA423 init now
+//   power                     - battery voltage + discharge mA (measure on battery!)
+//   sleep                     - blank the screen now, without waiting for the timeout
+//   timeout <sec>             - set the screen timeout (0 = never), persisted
+//   pmlocks                   - dump esp_pm locks; verifies DFS is really engaging
+//   powerlog [clear]          - dump / reset the RTC-memory power trace.
+//                               To measure for real: `powerlog clear`, unplug
+//                               USB, use the watch, replug, `powerlog`.
 
 enum class DebugCmdType : uint8_t {
     NONE,
@@ -39,6 +46,12 @@ enum class DebugCmdType : uint8_t {
     EXTEN_SET,
     BMA_DIAG,
     BMA_RETRY,
+    POWER_INFO,
+    SCREEN_OFF,
+    TIMEOUT_SET,
+    POWERLOG_DUMP,
+    POWERLOG_CLEAR,
+    PM_LOCKS,
 };
 
 struct DebugCmd {
@@ -47,6 +60,7 @@ struct DebugCmd {
     int32_t tap_x = 120;       // TAP: screen-space x, 0-239
     uint8_t reg = 0;           // TOUCH_WRITE: register
     uint8_t val = 0;           // TOUCH_WRITE: value
+    uint16_t seconds = 0;      // TIMEOUT_SET: screen timeout
     bool flag = false;         // LDO3_MODE: true = DCIN, false = LDO
 };
 

@@ -1,6 +1,7 @@
 #include "esp_log.h"
 #include "debug_console.h"
 #include "power.h"
+#include "powersave.h"
 #include "rtc.h"
 #include "lgfx_twatch_v2.hpp"
 #include "touch.h"
@@ -80,6 +81,12 @@ extern "C" void app_main(void)
         ESP_LOGE(TAG, "haptic_init() failed — continuing without haptics");
     } else {
         ESP_LOGI(TAG, "haptic_init() OK");
+    }
+
+    // Enable DFS + light sleep last, so nothing above races a frequency
+    // change during bring-up.
+    if (powersave_init() != ESP_OK) {
+        ESP_LOGW(TAG, "powersave_init() failed — running without DFS/light sleep");
     }
 
     time_sync_init();

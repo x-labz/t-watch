@@ -26,6 +26,8 @@ BleScanResult ble_scan_read(void) { return BleScanResult{}; }
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 
+#include "powersave.h"
+
 static const char *TAG = "BLESCAN";
 static constexpr int kMaxDevs = 10;
 static constexpr int32_t kScanDurationMs = 4000;
@@ -191,16 +193,20 @@ static void ble_host_task(void *)
     nimble_port_freertos_deinit();
 }
 
-static void ble_scan_task(void *)
+// Separate body so PowersaveHold destructs before vTaskDelete — see the note
+// in wifiscan.cpp; an RAII guard in the task function leaks the lock.
+static void ble_scan_body(void)
 {
+    // Same reasoning as the wifi scan: the radio must not be light-slept
+    // through mid-discovery.
+    PowersaveHold awake;
+
     esp_err_t err = nimble_port_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "nimble_port_init failed: %s", esp_err_to_name(err));
         portENTER_CRITICAL(&s_lock);
         s_result.scanning = false;
         portEXIT_CRITICAL(&s_lock);
-        s_scan_in_progress.store(false, std::memory_order_relaxed);
-        vTaskDelete(nullptr);
         return;
     }
 
@@ -231,6 +237,11 @@ static void ble_scan_task(void *)
                  snapshot.devs[i].name[0] ? snapshot.devs[i].name : "(no name)",
                  a[5], a[4], a[3], a[2], a[1], a[0], snapshot.devs[i].rssi);
     }
+}
+
+static void ble_scan_task(void *)
+{
+    ble_scan_body();                  // PowersaveHold released here
     s_scan_in_progress.store(false, std::memory_order_relaxed);
     vTaskDelete(nullptr);
 }

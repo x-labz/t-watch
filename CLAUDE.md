@@ -770,6 +770,47 @@ Rules:
 - Verify DFS actually engages: `CONFIG_PM_PROFILING=y` and dump `esp_pm_dump_locks()`
   behind a debug command — if some task holds a lock forever, DFS is dead.
 
+### As built (2026-08-25): DFS + automatic light sleep + screen timeout
+`main/powersave.cpp` calls `esp_pm_configure()` (40–240 MHz, `light_sleep_enable`).
+**This call is what actually turns DFS and light sleep on — `CONFIG_PM_ENABLE=y`
+alone does nothing**, and this project ran pinned at 240 MHz until it was added.
+Tasks that must not be interrupted hold the `ESP_PM_NO_LIGHT_SLEEP` lock via
+`powersave_prevent_sleep()` / the `PowersaveHold` RAII guard; the UI task holds
+it whenever the screen is on, and releases it when the screen blanks.
+
+Screen timeout (`settings_get_screen_timeout_s()`, default 15 s, 0 = never, in
+NVS beside brightness). On timeout the UI task: backlight to 0 → `lcd.sleep()`
+→ `touch_sleep()` (FT6336 into DEEPSLEEP, ~3 mA → ~100 µA) → releases the
+no-sleep lock → stops rendering entirely. LDO3 stays up so waking does not need
+the full section-3 re-init.
+
+**Wake is the accelerometer, not touch.** Keeping the FT6336 alive to wake on
+touch costs ~3 mA — more than the entire screen-off budget — so instead the UI
+task polls the BMA423 while dark (~4 Hz) and wakes when the gravity vector
+moves by more than ~0.35 g. Hardware tilt/tap interrupts would be cheaper again
+but need the BMA423 feature engine's config-file upload, which we do not
+currently do (section 2). Waking pulses EXTEN to bring touch back — which only
+works because the EXTEN bit is now driven correctly (section 3).
+
+**Verified 2026-08-25** with `pmlocks` (`CONFIG_PM_PROFILING=y` + `esp_pm_dump_locks`):
+66% of time in light sleep, 23% awake at 40 MHz, 10% at 240 MHz,
+`light_sleep_reject_counts:0` — against 100% pinned at 240 MHz before.
+
+**RAII + `vTaskDelete` is a trap here.** A `PowersaveHold` living in a task
+function leaks the lock forever, because `vTaskDelete(nullptr)` never returns
+and the destructor never runs — which silently disables light sleep for the
+whole system. `pmlocks` showed `no_sleep Active=2` and `light_sleep_counts:0`.
+The radio scan tasks therefore put the guarded work in a separate body function
+and call `vTaskDelete` only after it returns. Check `Active` is 0 at idle
+whenever adding a new lock holder.
+
+**Measuring it:** the discharge ADC reads ~0 while USB is attached, and
+unplugging removes the console — so `powersave_log_sample()` writes a trace
+into RTC memory once a second. Procedure: `powerlog clear` → unplug USB → use
+the watch → replug → `powerlog`, which prints CSV plus screen-on/screen-off
+averages. RTC memory (not NVS) because this is a cheap-to-retake diagnostic
+and must not wear flash at one write per second.
+
 ### Sleep ladder (increasing savings)
 1. **Idle, screen on:** DFS 40 MHz floor + tickless light sleep between events.
 2. **Screen off:** LDO2 off → `lcd.sleep()` → suspend UI task. Wake sources: BMA423
@@ -954,6 +995,10 @@ exercises the real code path, not a parallel one.
 | `touchmon` | poll raw touch status for 10 s — proves whether the sensor reports points at all |
 | `treg <hex> <hex>` | write any FT6336 register, so config hypotheses can be tested without a reflash |
 | `exten 0\|1` | drive the touch reset line (REG12 bit 0). `exten 0` reproduces "dead touch" exactly |
+| `power` | battery mV / % / discharge mA — reads 0 mA on USB, see section 9 |
+| `powerlog [clear]` | dump / reset the RTC-memory power trace (the only way to measure off-USB) |
+| `sleep` | blank the screen now instead of waiting for the timeout |
+| `timeout <sec>` | set the screen timeout, 0 = never; persisted to NVS |
 | `bma` | BMA423 health: probe, raw chip id, config registers, live reading (~1g at rest) |
 | `bmainit` | re-run the BMA423 init now |
 | `ldo3 0\|1` | set AXP202 LDO3 mode (0 = LDO, 1 = DCIN). Diagnostic only — **leave it at 0** |
@@ -977,6 +1022,16 @@ kill %1; exec 3<&-'
 ```
 Add a command here rather than adding a one-off test build whenever a bug needs
 a repeatable trigger.
+
+**Light sleep eats the first command.** With automatic light sleep enabled
+(section 9), the bytes that wake the chip are consumed, so the first command
+sent after an idle period is silently lost — no "unknown command" warning, just
+nothing. Send a bare newline, pause ~1 s, then the real command:
+```bash
+printf "\n" >&3; sleep 1; printf "view gps\n" >&3
+```
+Once the screen is on the UI holds the no-sleep lock and the console is
+reliable again, so this only bites the first command of a session.
 
 ### Crash decoding
 ```bash

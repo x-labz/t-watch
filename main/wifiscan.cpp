@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
+#include "powersave.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -18,8 +19,19 @@ static WifiScanResult s_result;
 static std::atomic<bool> s_scan_in_progress{false};
 static bool s_netif_ready = false;
 
-static void wifi_scan_task(void *)
+// The scan body is a separate function purely so PowersaveHold's destructor is
+// guaranteed to run: vTaskDelete(nullptr) never returns, so an RAII guard
+// living in the task function would leak the lock and silently disable light
+// sleep forever. (Caught by `pmlocks` showing Active=2 — exactly the check
+// CLAUDE.md section 9 asks for.)
+static void wifi_scan_body(void)
 {
+    // CLAUDE.md section 9: WiFi needs the APB at >= 80 MHz while started, and
+    // must not be light-slept through. Holding the lock for the whole scan is
+    // simpler and safer than reconfiguring min_freq globally, which would race
+    // anything else running.
+    PowersaveHold awake;
+
     if (!s_netif_ready) {
         esp_netif_init();
         esp_event_loop_create_default();
@@ -31,8 +43,6 @@ static void wifi_scan_task(void *)
     esp_err_t err = esp_wifi_init(&cfg);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_wifi_init failed: %s", esp_err_to_name(err));
-        s_scan_in_progress.store(false, std::memory_order_relaxed);
-        vTaskDelete(nullptr);
         return;
     }
     esp_wifi_set_mode(WIFI_MODE_STA);
@@ -75,7 +85,11 @@ static void wifi_scan_task(void *)
     // not just on view exit, since a scan result is a static snapshot.
     esp_wifi_stop();
     esp_wifi_deinit();
+}
 
+static void wifi_scan_task(void *)
+{
+    wifi_scan_body();                 // PowersaveHold released here
     s_scan_in_progress.store(false, std::memory_order_relaxed);
     vTaskDelete(nullptr);
 }

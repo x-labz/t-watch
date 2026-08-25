@@ -25,6 +25,11 @@ struct BatteryReading {
 // Reads the AXP202 fuel gauge. Valid only after power_init() returns ESP_OK.
 BatteryReading power_read_battery(void);
 
+// Battery discharge current in mA, from the AXP202's ADC. Reads ~0 while USB
+// is plugged in, because the system runs from VBUS then — so power
+// measurements must be taken on battery (CLAUDE.md section 2).
+float power_battery_discharge_ma(void);
+
 // AXP202 LDO4 — GPS module power. Off by default (CLAUDE.md section 9: GPS
 // is the biggest power consumer, gate it to only when a fix is being
 // acquired). See gps.h for the refcounted acquire/release wrapper.

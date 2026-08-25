@@ -22,6 +22,15 @@ bool touch_read(int32_t *x, int32_t *y);
 uint32_t touch_error_count(void);          // consecutive failed reads
 esp_err_t touch_probe(void);               // does 0x38 ACK right now?
 esp_err_t touch_recover(void);             // EXTEN reset + re-add I2C device
+
+// --- power management --------------------------------------------------
+// Puts the controller into DEEPSLEEP (~100uA, vs ~3mA in its monitor mode) —
+// worth doing whenever the screen is off, since a blank screen cannot be
+// meaningfully touched anyway. It stops answering I2C entirely in this state;
+// touch_wake() pulses EXTEN to bring it back, which only works because the
+// EXTEN bit is now driven correctly (see the warning in CLAUDE.md section 3).
+void touch_sleep(void);
+esp_err_t touch_wake(void);
 void touch_scan_bus(void);                 // log every address that ACKs on I2C1
 
 // Test hook: drops the controller into DEEPSLEEP, reproducing the "touch is

@@ -18,3 +18,9 @@ uint8_t settings_get_brightness(void);
 
 // Updates the in-memory value and persists it to flash immediately.
 void settings_set_brightness(uint8_t brightness);
+
+// Seconds of no interaction before the screen blanks and the watch drops to
+// its low-power idle. 0 disables the timeout (screen stays on). Persisted in
+// flash for the same reason as brightness: it is an explicit user choice.
+uint16_t settings_get_screen_timeout_s(void);
+void settings_set_screen_timeout_s(uint16_t seconds);

@@ -149,6 +149,10 @@ esp_err_t power_init(void)
     s_pmu.enableBattDetection();
     s_pmu.enableBattVoltageMeasure();
     s_pmu.enableVbusVoltageMeasure();
+    // Note enableBattVoltageMeasure() above turns on MONITOR_BAT_CURRENT as
+    // well as MONITOR_BAT_VOLTAGE, so the discharge-current ADC used by
+    // power_battery_discharge_ma() is already covered — there is no separate
+    // "enable current" call to make.
     s_pmu.enableSystemVoltageMeasure();
 
     ESP_LOGI(TAG, "LDO2(backlight)=%s %umV  LDO3(panel/touch)=%s %umV  EXTEN(touch rst)=%s",
@@ -169,6 +173,11 @@ BatteryReading power_read_battery(void)
     int pct = s_pmu.getBatteryPercent();
     r.percent = pct < 0 ? 0 : pct;
     return r;
+}
+
+float power_battery_discharge_ma(void)
+{
+    return s_pmu.getBattDischargeCurrent();
 }
 
 void power_touch_reset(void)

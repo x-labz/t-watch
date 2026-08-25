@@ -2,6 +2,7 @@
 
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "esp_log.h"
@@ -95,6 +96,19 @@ static void debug_console_task(void *)
             cmd.type = DebugCmdType::TOUCH_WRITE;
             cmd.reg = (uint8_t)r;
             cmd.val = (uint8_t)v;
+        } else if (strcmp(line, "pmlocks") == 0) {
+            cmd.type = DebugCmdType::PM_LOCKS;
+        } else if (strcmp(line, "powerlog clear") == 0) {
+            cmd.type = DebugCmdType::POWERLOG_CLEAR;
+        } else if (strcmp(line, "powerlog") == 0) {
+            cmd.type = DebugCmdType::POWERLOG_DUMP;
+        } else if (strcmp(line, "power") == 0) {
+            cmd.type = DebugCmdType::POWER_INFO;
+        } else if (strcmp(line, "sleep") == 0) {
+            cmd.type = DebugCmdType::SCREEN_OFF;
+        } else if (strncmp(line, "timeout ", 8) == 0) {
+            cmd.type = DebugCmdType::TIMEOUT_SET;
+            cmd.seconds = (uint16_t)atoi(line + 8);
         } else if (strcmp(line, "bmainit") == 0) {
             cmd.type = DebugCmdType::BMA_RETRY;
         } else if (strcmp(line, "bma") == 0) {

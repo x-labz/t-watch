@@ -1,6 +1,7 @@
 #include "ui_task.h"
 
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -19,6 +20,7 @@
 #include "gps.h"
 #include "haptic.h"
 #include "power.h"
+#include "powersave.h"
 #include "settings.h"
 #include "tilt.h"
 #include "time_sync.h"
@@ -39,6 +41,16 @@ static constexpr uint32_t kTiltRefreshUs = 66000;   // ~15 Hz while TILT is focu
 static constexpr uint16_t kHapticEffectMax = 123;   // DRV2605 ROM library size (CLAUDE.md section 2)
 static constexpr int32_t kBrightnessStep = 26;       // ~10% of 255 per tap
 static constexpr int32_t kBrightnessMin = 26;        // keep the screen from going fully dark
+
+// Screen-off motion wake. With the screen dark the UI task polls the
+// accelerometer instead of rendering; a change in the gravity vector larger
+// than this counts as the watch being picked up or turned over.
+// Hardware tilt/tap interrupts would be cheaper still, but they live behind
+// the BMA423 feature engine, which needs a config-file upload we do not
+// currently do (CLAUDE.md section 2) — polling costs ~0.2 mA more and works
+// today. Poll interval is a compromise between wake latency and idle draw.
+static constexpr float kWakeTiltDeltaG = 0.35f;
+static constexpr uint32_t kSleepPollMs = 250;
 
 static std::atomic<bool> s_tick_pending{false};
 static std::atomic<bool> s_tilt_tick_pending{false};
@@ -352,12 +364,65 @@ static void ui_task_fn(void *arg)
 
     redraw();
 
+    bool screen_on = true;
+    int64_t last_activity_us = esp_timer_get_time();
+    TiltReading sleep_ref = tilt_read();   // gravity vector when the screen blanked
+
+    auto note_activity = [&]() { last_activity_us = esp_timer_get_time(); };
+
+    auto screen_off = [&]() {
+        if (!screen_on) return;
+        ESP_LOGI(TAG, "screen off (idle %us) — entering low-power idle",
+                 settings_get_screen_timeout_s());
+        lcd.setBrightness(0);
+        lcd.sleep();               // ST7789 sleep-in; LDO3 stays up so the
+                                   // panel does not need a full section-3
+                                   // re-init to come back
+        touch_sleep();             // ~3 mA -> ~100 uA
+        sleep_ref = tilt_read();
+        screen_on = false;
+        // Nothing is being rendered now, so stop holding the CPU up for it.
+        powersave_prevent_sleep(false);
+    };
+
+    auto screen_wake = [&]() {
+        if (screen_on) return;
+        powersave_prevent_sleep(true);
+        lcd.wakeup();
+        touch_wake();
+        lcd.setBrightness((uint8_t)brightness);
+        screen_on = true;
+        note_activity();
+        redraw();
+        ESP_LOGI(TAG, "screen on");
+    };
+
+    // Rendering and SPI need a stable APB, so the UI holds the lock whenever
+    // the screen is actually up (section 9); it is released while asleep.
+    powersave_prevent_sleep(true);
+
     bool touching = false;
     int32_t start_x = 0, start_y = 0, last_x = 0, last_y = 0;
 
     for (;;) {
         DebugCmd dbg;
         while (debug_console_poll(&dbg)) {
+            // Navigation/tap commands must behave like touching the watch,
+            // otherwise scripted tests fight the screen timeout. Diagnostic
+            // commands deliberately do NOT wake it — `power` in particular
+            // would otherwise destroy the screen-off measurement it exists to
+            // take.
+            switch (dbg.type) {
+                case DebugCmdType::GOTO_VIEW:
+                case DebugCmdType::NEXT_VIEW:
+                case DebugCmdType::PREV_VIEW:
+                case DebugCmdType::TAP:
+                    screen_wake();
+                    note_activity();
+                    break;
+                default:
+                    break;
+            }
             switch (dbg.type) {
                 case DebugCmdType::GOTO_VIEW: {
                     ViewId next = static_cast<ViewId>(dbg.view_index);
@@ -424,6 +489,36 @@ static void ui_task_fn(void *arg)
                 case DebugCmdType::BMA_RETRY:
                     tilt_retry_init();
                     break;
+                case DebugCmdType::POWER_INFO: {
+                    BatteryReading b = power_read_battery();
+                    ESP_LOGW(TAG, "power: %umV %d%% draw=%.1f mA charging=%d vbus=%d "
+                                  "screen=%s timeout=%us",
+                             b.voltage_mv, b.percent, (double)powersave_battery_draw_ma(),
+                             b.charging, b.vbus_in, screen_on ? "ON" : "OFF",
+                             settings_get_screen_timeout_s());
+                    if (b.vbus_in) {
+                        ESP_LOGW(TAG, "  NOTE: USB is plugged in, so draw reads ~0 — "
+                                      "unplug and read the log after to measure for real");
+                    }
+                    break;
+                }
+                case DebugCmdType::SCREEN_OFF:
+                    screen_off();
+                    break;
+                case DebugCmdType::POWERLOG_DUMP:
+                    powersave_log_dump();
+                    break;
+                case DebugCmdType::POWERLOG_CLEAR:
+                    powersave_log_clear();
+                    break;
+                case DebugCmdType::PM_LOCKS:
+                    powersave_dump_locks();
+                    break;
+                case DebugCmdType::TIMEOUT_SET:
+                    settings_set_screen_timeout_s(dbg.seconds);
+                    ESP_LOGW(TAG, "screen timeout -> %us%s", dbg.seconds,
+                             dbg.seconds == 0 ? " (never)" : "");
+                    break;
                 case DebugCmdType::LDO3_MODE:
                     power_set_ldo3_dcin_mode(dbg.flag);
                     vTaskDelay(pdMS_TO_TICKS(200));
@@ -456,17 +551,54 @@ static void ui_task_fn(void *arg)
             if (current == ViewId::WIFI) wifi = to_wifi_vm(wifi_scan_read());
             if (current == ViewId::BLE) ble = to_ble_vm(ble_scan_read());
 
+            powersave_log_sample(screen_on);
+
+            // Pointless (and power-wasteful) to compose and push a frame to a
+            // panel that is in sleep-in with the backlight off.
+            if (screen_on) redraw();
+        }
+
+        if (s_tilt_tick_pending.exchange(false, std::memory_order_relaxed) &&
+            current == ViewId::TILT && screen_on) {
+            tilt = to_tilt_vm(tilt_read());
             redraw();
         }
 
-        if (s_tilt_tick_pending.exchange(false, std::memory_order_relaxed) && current == ViewId::TILT) {
-            tilt = to_tilt_vm(tilt_read());
-            redraw();
+        if (!screen_on) {
+            // Screen is dark: the only thing worth doing is watching for the
+            // watch being picked up. touch is in DEEPSLEEP and would not
+            // answer anyway. vTaskDelay below is what actually lets the chip
+            // light-sleep between polls.
+            TiltReading t = tilt_read();
+            float dx_g = t.accel_x_g - sleep_ref.accel_x_g;
+            float dy_g = t.accel_y_g - sleep_ref.accel_y_g;
+            float dz_g = t.accel_z_g - sleep_ref.accel_z_g;
+            if (dx_g * dx_g + dy_g * dy_g + dz_g * dz_g >
+                kWakeTiltDeltaG * kWakeTiltDeltaG) {
+                ESP_LOGI(TAG, "motion wake (d=%.2fg)",
+                         (double)sqrtf(dx_g * dx_g + dy_g * dy_g + dz_g * dz_g));
+                screen_wake();
+            }
+            // The 1 Hz timer still fires while asleep, so sample there too —
+            // otherwise the log would only ever contain screen-on numbers.
+            if (s_tick_pending.exchange(false, std::memory_order_relaxed)) {
+                powersave_log_sample(false);
+            }
+            vTaskDelay(pdMS_TO_TICKS(kSleepPollMs));
+            continue;
+        }
+
+        uint16_t timeout_s = settings_get_screen_timeout_s();
+        if (timeout_s > 0 &&
+            (esp_timer_get_time() - last_activity_us) > (int64_t)timeout_s * 1000000) {
+            screen_off();
+            continue;
         }
 
         int32_t x = 0, y = 0;
         bool pressed = touch_read(&x, &y);
         if (pressed) {
+            note_activity();
             if (!touching) {
                 touching = true;
                 start_x = x;
