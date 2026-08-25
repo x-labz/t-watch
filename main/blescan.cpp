@@ -1,5 +1,17 @@
 #include "blescan.h"
 
+#include "sdkconfig.h"
+
+#if !CONFIG_BT_ENABLED
+
+// Bluetooth compiled out: keep the view harmless rather than failing the
+// build, so BT can be toggled off (e.g. to A/B a suspected interaction with
+// another peripheral) without touching the UI layer.
+void ble_scan_start(void) {}
+BleScanResult ble_scan_read(void) { return BleScanResult{}; }
+
+#else
+
 #include <atomic>
 #include <cstring>
 
@@ -174,3 +186,5 @@ BleScanResult ble_scan_read(void)
     portEXIT_CRITICAL(&s_lock);
     return copy;
 }
+
+#endif  // CONFIG_BT_ENABLED

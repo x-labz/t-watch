@@ -387,6 +387,16 @@ static void ui_task_fn(void *arg)
                              (unsigned)esp_get_free_heap_size(),
                              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
                     break;
+                case DebugCmdType::TOUCH_INFO:
+                    ESP_LOGI(TAG, "touch: consecutive_errors=%u probe(0x38)=%s",
+                             (unsigned)touch_error_count(), esp_err_to_name(touch_probe()));
+                    power_log_rails();
+                    power_scan_bus0();
+                    touch_scan_bus();
+                    break;
+                case DebugCmdType::TOUCH_FIX:
+                    touch_recover();
+                    break;
                 default: break;
             }
         }

@@ -12,6 +12,8 @@
 //   next / prev               - swipe to the next/previous view
 //   tap [left|right|center]   - simulate a tap (default center)
 //   status                    - log the current view + key state
+//   touch                     - report touch I2C health (error count, probe)
+//   touchfix                  - EXTEN-reset the FT6336 and re-add it
 
 enum class DebugCmdType : uint8_t {
     NONE,
@@ -20,6 +22,8 @@ enum class DebugCmdType : uint8_t {
     PREV_VIEW,
     TAP,
     STATUS,
+    TOUCH_INFO,
+    TOUCH_FIX,
 };
 
 struct DebugCmd {

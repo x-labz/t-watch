@@ -49,9 +49,7 @@ esp_err_t power_init(void)
     s_pmu.enableLDO2();
 
     // EXTEN off -> delay -> on resets the FT6336 touch controller.
-    s_pmu.disableExternalPin();
-    vTaskDelay(pdMS_TO_TICKS(20));
-    s_pmu.enableExternalPin();
+    power_touch_reset();
 
     // Panel power-up settle time before lcd.init().
     vTaskDelay(pdMS_TO_TICKS(150));
@@ -87,6 +85,47 @@ BatteryReading power_read_battery(void)
     int pct = s_pmu.getBatteryPercent();
     r.percent = pct < 0 ? 0 : pct;
     return r;
+}
+
+void power_touch_reset(void)
+{
+    s_pmu.disableExternalPin();
+    vTaskDelay(pdMS_TO_TICKS(20));
+    s_pmu.enableExternalPin();
+}
+
+void power_log_rails(void)
+{
+    ESP_LOGI(TAG, "rails: LDO2(backlight)=%s %umV  LDO3(panel/touch)=%s %umV  "
+                  "LDO4(gps)=%s %umV  EXTEN(touch rst)=%s",
+             s_pmu.isEnableLDO2() ? "ON" : "OFF", s_pmu.getLDO2Voltage(),
+             s_pmu.isEnableLDO3() ? "ON" : "OFF", s_pmu.getLDO3Voltage(),
+             s_pmu.isEnableLDO4() ? "ON" : "OFF", s_pmu.getLDO4Voltage(),
+             s_pmu.isEnableExternalPin() ? "ON" : "OFF");
+}
+
+void power_scan_bus0(void)
+{
+    int found = 0;
+    for (uint8_t addr = 0x08; addr < 0x78; addr++) {
+        if (i2c_master_probe(s_i2c_bus0, addr, 50) == ESP_OK) {
+            ESP_LOGW(TAG, "i2c0 device found at 0x%02x", addr);
+            found++;
+        }
+    }
+    ESP_LOGW(TAG, "i2c0 scan done: %d device(s)", found);
+}
+
+void power_cycle_ldo3(void)
+{
+    ESP_LOGW(TAG, "power-cycling LDO3 (panel + touch)");
+    s_pmu.disableLDO3();
+    vTaskDelay(pdMS_TO_TICKS(150));
+    s_pmu.setLDO3Voltage(TWATCH_LDO3_PANEL_MV);
+    s_pmu.enableLDO3();
+    vTaskDelay(pdMS_TO_TICKS(150));
+    power_touch_reset();
+    vTaskDelay(pdMS_TO_TICKS(150));
 }
 
 void power_gps_power(bool on)

@@ -29,3 +29,22 @@ BatteryReading power_read_battery(void);
 // is the biggest power consumer, gate it to only when a fix is being
 // acquired). See gps.h for the refcounted acquire/release wrapper.
 void power_gps_power(bool on);
+
+// Pulses the AXP202 EXTEN output (off -> delay -> on), which is the FT6336's
+// reset line on this board — there is no GPIO for it (CLAUDE.md section 2).
+// Used both during init and to recover a touch controller that has wedged.
+void power_touch_reset(void);
+
+// Reports LDO2/LDO3 enable state + voltage, for diagnosing whether a dead
+// peripheral is actually an unpowered one.
+void power_log_rails(void);
+
+// Logs every address that ACKs on I2C bus 0 (expect AXP202 0x35, BMA423 0x19,
+// PCF8563 0x51, DRV2605 0x5A). A healthy bus 0 next to a silent bus 1 says the
+// fault is isolated to the touch side rather than I2C/power generally.
+void power_scan_bus0(void);
+
+// Full power-cycle of LDO3 (panel + touch). Harsher than the EXTEN reset and
+// the only way to truly reset the panel, which has no RST pin (section 3).
+// Caller must re-run lcd.init() afterwards if it cares about the display.
+void power_cycle_ldo3(void);

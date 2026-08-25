@@ -76,8 +76,13 @@ static void debug_console_task(void *)
             else cmd.tap_x = 120;
         } else if (strcmp(line, "status") == 0) {
             cmd.type = DebugCmdType::STATUS;
+        } else if (strcmp(line, "touch") == 0) {
+            cmd.type = DebugCmdType::TOUCH_INFO;
+        } else if (strcmp(line, "touchfix") == 0) {
+            cmd.type = DebugCmdType::TOUCH_FIX;
         } else {
-            ESP_LOGW(TAG, "unknown command '%s' (try: view <name>, next, prev, tap [left|right], status)", line);
+            ESP_LOGW(TAG, "unknown command '%s' (try: view <name>, next, prev, tap [left|right], "
+                          "status, touch, touchfix)", line);
             continue;
         }
         xQueueSend(s_queue, &cmd, 0);
@@ -88,7 +93,7 @@ void debug_console_start(void)
 {
     s_queue = xQueueCreate(4, sizeof(DebugCmd));
     xTaskCreate(debug_console_task, "dbg_console", 4096, nullptr, 3, nullptr);
-    ESP_LOGI(TAG, "ready — commands: view <name>, next, prev, tap [left|right], status");
+    ESP_LOGI(TAG, "ready — commands: view <name>, next, prev, tap [left|right], status, touch, touchfix");
 }
 
 bool debug_console_poll(DebugCmd *cmd)
