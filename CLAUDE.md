@@ -833,7 +833,7 @@ Rules:
 Port is `/dev/ttyUSB0` on most units, `/dev/ttyACM0` on the primary dev unit — see
 section 5. Substitute whichever `ls /dev/ttyUSB* /dev/ttyACM*` shows on your unit.
 
-**The port number is NOT stable.** A brownout reset re-enumerates the USB device, and
+**The port number is NOT stable.** A reset re-enumerates the USB device, and
 it can come back as `ttyACM1`, `ttyACM2`, … Symptoms are confusing: flash fails with a
 bare `ninja: build stopped`, or a serial capture silently produces an empty log while
 the watch is plainly running. Resolve the port per-invocation rather than hardcoding it:
@@ -846,11 +846,12 @@ idf.py build
 idf.py -p "$PORT" -b 921600 flash          # drop to 460800/115200 on sync errors
 ```
 
-### Flash/boot is UNRELIABLE on this unit — always retry in a loop
-A successful flash frequently still boots into the brownout loop (`rst:0x10
-(RTCWDT_RTC_RESET)`, `csum err`, garbage `load:` addresses). On a bad day it
-took 5 attempts. Never treat one failed attempt as a result — script the retry,
-re-resolving the port each pass since a brownout renumbers it:
+### Boot-loop retry loop (mostly historical since the 40 MHz flash fix)
+Flashing used to boot-loop roughly half the time (`rst:0x10`, `csum err`,
+garbage `load:` addresses). **That was the 80 MHz flash clock and is fixed —
+see section 13; 40 MHz measured 30/30 clean boots.** Keep the retry loop for
+unattended scripts anyway: it costs nothing, and it re-resolves the port each
+pass, which still matters because a reset can renumber the USB device.
 ```bash
 for a in 1 2 3 4 5; do
   PORT=$(ls /dev/ttyACM* /dev/ttyUSB* 2>/dev/null | head -1)
@@ -862,14 +863,32 @@ for a in 1 2 3 4 5; do
 done
 ```
 
+### DECODE `rst:0x..` BEFORE NAMING A FAILURE
+Naming a failure from its symptom pattern instead of its reset code cost hours
+here: the boot loops were called "brownouts" for a whole session when the code
+said RTC watchdog, which sent the investigation at batteries and USB cables
+instead of the flash clock. The ESP32 codes (`esp_rom/esp32/include/esp32/rom/rtc.h`):
+| Code | Meaning |
+|---|---|
+| `0x01` | POWERON_RESET — real power-on |
+| `0x03` | SW_RESET |
+| `0x05` | DEEPSLEEP_RESET |
+| `0x07`/`0x08` | TG0/TG1 watchdog |
+| `0x0c` | SW_CPU_RESET — e.g. after a panic |
+| **`0x0f`** | **RTCWDT_BROWN_OUT_RESET — the actual brownout**, "vdd not stable" |
+| **`0x10`** | **RTCWDT_RTC_RESET — RTC watchdog**, boot did not complete in time |
+Corollary: if a failure reproduces during a **read-only** operation
+(`esptool.py flash_id`) or before your code runs, it is not your firmware —
+stop reading application code and look at flash/clock/board settings.
+
 ### A serial capture is only EVIDENCE if the firmware was alive for it
 This is the single easiest way to reach a confidently wrong conclusion here.
-An empty log looks identical whether the watch is idle, brownout-looping, or
+An empty log looks identical whether the watch is idle, boot-looping, or
 off USB entirely — all three happened while "testing" touch on 2026-08-25, and
 each empty log was briefly mistaken for "the feature is broken". Before drawing
 *any* negative conclusion from a capture, confirm all three:
 1. `ls /dev/ttyACM* /dev/ttyUSB*` still shows a port (it can vanish mid-test),
-2. `grep -c 'rst:0x10' capture.log` is **0** (no brownout resets in the window),
+2. `grep -c 'rst:0x' capture.log` is **0** (no resets at all in the window),
 3. the log contains periodic output proving the app was running — GPS lines
    during time-sync, or send `status` over the console and see it answer.
 Builds that print nothing while idle need (3) explicitly; for a human-in-the-
@@ -1014,7 +1033,7 @@ tier 3 "is my panel config right?".
 | Watch won't enumerate on USB | Watch powered off (long-press PEK), or dead battery. **Also happens spontaneously mid-session** on this unit — the port simply disappears, and any capture then reads nothing while the watch looks fine. Check `lsusb` for `1a86:55d4` before blaming firmware |
 | Flash fails "Failed to write to target RAM" | Lower baud (460800/115200); check CH340 driver |
 | Board boot-loops: `rst:0x10 (RTCWDT_RTC_RESET)` / `csum err` / `invalid header` / garbage `load:` addresses | **80 MHz flash clock — FIXED 2026-08-25 by dropping to 40 MHz.** Despite months of calling this a "brownout", `rst:0x10` is `RTCWDT_RTC_RESET` (the RTC **watchdog**); the brownout reset is `rst:0x0f` (`RTCWDT_BROWN_OUT_RESET`) and was NEVER seen. The failure is the **ROM bootloader** failing to read flash — `load:` segment 1 succeeds, segment 2 returns `0xffffffff`, boot never completes, watchdog resets. That stage runs before PSRAM and before our code, so no firmware change could ever have caused or fixed it. `clock div:1` in the boot banner = 80 MHz, `div:2` = 40 MHz. Measured: 80 MHz failed roughly half of all attempts; **40 MHz gave 30/30 clean boots**. Espressif's flash-mode docs warn 80 MHz "may cause crashing if the flash or board design is not capable of this speed". Note LilyGO's own firmware ships the same 80 MHz header and boot-looped identically, so this is the unit, not our build |
-| A serial capture is empty / a feature "does nothing" | Do not conclude anything yet — verify the firmware was actually alive for that window (section 11). Port vanished, brownout loop, and idle-silent builds all produce identical empty logs |
+| A serial capture is empty / a feature "does nothing" | Do not conclude anything yet — verify the firmware was actually alive for that window (section 11). Port vanished, boot loop, and idle-silent builds all produce identical empty logs |
 | Permission denied /dev/ttyUSB0 | User not in dialout group |
 | Random reboots when GPS on | Brownout: enable LDO4 only when needed, check battery |
 | Everything dies after `esp_deep_sleep_start` | Expected: only RTC domain survives; re-run full init order on wake |
