@@ -31,3 +31,8 @@ struct GpsVM {
     uint8_t utc_hh = 0, utc_mm = 0, utc_ss = 0;
     uint32_t sentence_count = 0;
 };
+
+struct TiltVM {
+    float accel_x_g = 0;
+    float accel_y_g = 0;
+};

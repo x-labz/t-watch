@@ -11,6 +11,7 @@
 
 #include "gps.h"
 #include "power.h"
+#include "tilt.h"
 #include "touch.h"
 #include "ui/render.h"
 #include "ui/view.h"
@@ -23,14 +24,21 @@ static constexpr int32_t kScreenH = 240;
 static constexpr int32_t kStripH = 40;
 static constexpr int32_t kSwipeThresholdPx = 40;
 static constexpr int64_t kSwipeDurationUs = 200000;
+static constexpr uint32_t kTiltRefreshUs = 66000;   // ~15 Hz while TILT is focused
 
 static std::atomic<bool> s_tick_pending{false};
 static std::atomic<uint32_t> s_seconds{0};
+static std::atomic<bool> s_tilt_tick_pending{false};
 
 static void tick_cb(void *)
 {
     s_seconds.fetch_add(1, std::memory_order_relaxed);
     s_tick_pending.store(true, std::memory_order_relaxed);
+}
+
+static void tilt_tick_cb(void *)
+{
+    s_tilt_tick_pending.store(true, std::memory_order_relaxed);
 }
 
 static inline int32_t iabs(int32_t v)
@@ -67,22 +75,33 @@ static GpsVM to_gps_vm(const GpsReading &r)
     return vm;
 }
 
+static TiltVM to_tilt_vm(const TiltReading &r)
+{
+    TiltVM vm;
+    vm.accel_x_g = r.accel_x_g;
+    vm.accel_y_g = r.accel_y_g;
+    return vm;
+}
+
 static const char *view_name(ViewId id)
 {
     switch (id) {
         case ViewId::WATCHFACE: return "WATCHFACE";
         case ViewId::BATTERY: return "BATTERY";
         case ViewId::GPS: return "GPS";
+        case ViewId::TILT: return "TILT";
         default: return "?";
     }
 }
 
-static void render_view(ViewId id, LGFX_Sprite &frame, const WatchfaceVM &wf, const BatteryVM &batt, const GpsVM &gps)
+static void render_view(ViewId id, LGFX_Sprite &frame, const WatchfaceVM &wf, const BatteryVM &batt,
+                         const GpsVM &gps, const TiltVM &tilt)
 {
     switch (id) {
         case ViewId::WATCHFACE: render_watchface(frame, wf); break;
         case ViewId::BATTERY: render_battery(frame, batt); break;
         case ViewId::GPS: render_gps(frame, gps); break;
+        case ViewId::TILT: render_tilt(frame, tilt); break;
         default: break;
     }
 }
@@ -175,6 +194,17 @@ static void ui_task_fn(void *arg)
     ESP_ERROR_CHECK(esp_timer_create(&tick_args, &tick_timer));
     ESP_ERROR_CHECK(esp_timer_start_periodic(tick_timer, 1000000));
 
+    // Faster tick so the tilt ball tracks motion smoothly while its view is
+    // focused; a no-op the rest of the time (checked against `current`
+    // below), so it costs nothing when the tilt view isn't visible.
+    esp_timer_create_args_t tilt_tick_args = {};
+    tilt_tick_args.callback = &tilt_tick_cb;
+    tilt_tick_args.dispatch_method = ESP_TIMER_TASK;
+    tilt_tick_args.name = "ui_tilt_tick";
+    esp_timer_handle_t tilt_tick_timer;
+    ESP_ERROR_CHECK(esp_timer_create(&tilt_tick_args, &tilt_tick_timer));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(tilt_tick_timer, kTiltRefreshUs));
+
     LGFX_Sprite *frame_cur = &frame_a;
     LGFX_Sprite *frame_other = &frame_b;
 
@@ -182,8 +212,9 @@ static void ui_task_fn(void *arg)
     WatchfaceVM wf{};
     BatteryVM batt = to_battery_vm(power_read_battery());
     GpsVM gps = to_gps_vm(gps_read());
+    TiltVM tilt = to_tilt_vm(tilt_read());
 
-    render_view(current, *frame_cur, wf, batt, gps);
+    render_view(current, *frame_cur, wf, batt, gps, tilt);
     push_frame_locked(lcd, *frame_cur, pm_lock);
 
     bool touching = false;
@@ -197,8 +228,15 @@ static void ui_task_fn(void *arg)
             wf.ss = secs % 60;
             batt = to_battery_vm(power_read_battery());
             gps = to_gps_vm(gps_read());
+            tilt = to_tilt_vm(tilt_read());
 
-            render_view(current, *frame_cur, wf, batt, gps);
+            render_view(current, *frame_cur, wf, batt, gps, tilt);
+            push_frame_locked(lcd, *frame_cur, pm_lock);
+        }
+
+        if (s_tilt_tick_pending.exchange(false, std::memory_order_relaxed) && current == ViewId::TILT) {
+            tilt = to_tilt_vm(tilt_read());
+            render_view(current, *frame_cur, wf, batt, gps, tilt);
             push_frame_locked(lcd, *frame_cur, pm_lock);
         }
 
@@ -235,7 +273,10 @@ static void ui_task_fn(void *arg)
                 ViewId next = static_cast<ViewId>(next_idx);
 
                 if (next != current) {
-                    render_view(next, *frame_other, wf, batt, gps);
+                    if (next == ViewId::TILT) {
+                        tilt = to_tilt_vm(tilt_read());
+                    }
+                    render_view(next, *frame_other, wf, batt, gps, tilt);
                     animate_swipe(lcd, *frame_cur, *frame_other, to_enters_from_right, strips, pm_lock);
 
                     // GPS is the single biggest power draw on this board
