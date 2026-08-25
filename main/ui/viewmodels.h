@@ -37,3 +37,7 @@ struct TiltVM {
     float accel_x_g = 0;
     float accel_y_g = 0;
 };
+
+struct HapticVM {
+    uint16_t effect_id = 1;
+};

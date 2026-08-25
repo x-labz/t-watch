@@ -4,6 +4,7 @@
 #include "touch.h"
 #include "gps.h"
 #include "tilt.h"
+#include "haptic.h"
 #include "time_sync.h"
 #include "ui_task.h"
 
@@ -49,6 +50,12 @@ extern "C" void app_main(void)
         return;
     }
     ESP_LOGI(TAG, "tilt_init() OK");
+
+    if (haptic_init() != ESP_OK) {
+        ESP_LOGE(TAG, "haptic_init() failed");
+        return;
+    }
+    ESP_LOGI(TAG, "haptic_init() OK");
 
     time_sync_start();
     ESP_LOGI(TAG, "time_sync_start() — starting UI task");

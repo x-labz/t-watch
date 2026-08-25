@@ -11,6 +11,7 @@
 #include "freertos/task.h"
 
 #include "gps.h"
+#include "haptic.h"
 #include "power.h"
 #include "tilt.h"
 #include "time_sync.h"
@@ -27,6 +28,7 @@ static constexpr int32_t kStripH = 40;
 static constexpr int32_t kSwipeThresholdPx = 40;
 static constexpr int64_t kSwipeDurationUs = 200000;
 static constexpr uint32_t kTiltRefreshUs = 66000;   // ~15 Hz while TILT is focused
+static constexpr uint16_t kHapticEffectMax = 123;   // DRV2605 ROM library size (CLAUDE.md section 2)
 
 static std::atomic<bool> s_tick_pending{false};
 static std::atomic<bool> s_tilt_tick_pending{false};
@@ -90,18 +92,20 @@ static const char *view_name(ViewId id)
         case ViewId::BATTERY: return "BATTERY";
         case ViewId::GPS: return "GPS";
         case ViewId::TILT: return "TILT";
+        case ViewId::HAPTIC: return "HAPTIC";
         default: return "?";
     }
 }
 
 static void render_view(ViewId id, LGFX_Sprite &frame, const WatchfaceVM &wf, const BatteryVM &batt,
-                         const GpsVM &gps, const TiltVM &tilt)
+                         const GpsVM &gps, const TiltVM &tilt, const HapticVM &haptic)
 {
     switch (id) {
         case ViewId::WATCHFACE: render_watchface(frame, wf); break;
         case ViewId::BATTERY: render_battery(frame, batt); break;
         case ViewId::GPS: render_gps(frame, gps); break;
         case ViewId::TILT: render_tilt(frame, tilt); break;
+        case ViewId::HAPTIC: render_haptic(frame, haptic); break;
         default: break;
     }
 }
@@ -213,8 +217,9 @@ static void ui_task_fn(void *arg)
     BatteryVM batt = to_battery_vm(power_read_battery());
     GpsVM gps = to_gps_vm(gps_read());
     TiltVM tilt = to_tilt_vm(tilt_read());
+    HapticVM haptic{};
 
-    render_view(current, *frame_cur, wf, batt, gps, tilt);
+    render_view(current, *frame_cur, wf, batt, gps, tilt, haptic);
     push_frame_locked(lcd, *frame_cur, pm_lock);
 
     bool touching = false;
@@ -235,13 +240,13 @@ static void ui_task_fn(void *arg)
             gps = to_gps_vm(gps_read());
             tilt = to_tilt_vm(tilt_read());
 
-            render_view(current, *frame_cur, wf, batt, gps, tilt);
+            render_view(current, *frame_cur, wf, batt, gps, tilt, haptic);
             push_frame_locked(lcd, *frame_cur, pm_lock);
         }
 
         if (s_tilt_tick_pending.exchange(false, std::memory_order_relaxed) && current == ViewId::TILT) {
             tilt = to_tilt_vm(tilt_read());
-            render_view(current, *frame_cur, wf, batt, gps, tilt);
+            render_view(current, *frame_cur, wf, batt, gps, tilt, haptic);
             push_frame_locked(lcd, *frame_cur, pm_lock);
         }
 
@@ -281,7 +286,7 @@ static void ui_task_fn(void *arg)
                     if (next == ViewId::TILT) {
                         tilt = to_tilt_vm(tilt_read());
                     }
-                    render_view(next, *frame_other, wf, batt, gps, tilt);
+                    render_view(next, *frame_other, wf, batt, gps, tilt, haptic);
                     animate_swipe(lcd, *frame_cur, *frame_other, to_enters_from_right, strips, pm_lock);
 
                     // GPS is the single biggest power draw on this board
@@ -297,6 +302,22 @@ static void ui_task_fn(void *arg)
                              batt.battery_connected, batt.percent, batt.voltage_mv, batt.charging, batt.vbus_in,
                              wf.hh, wf.mm, wf.ss);
                 }
+            } else if (current == ViewId::HAPTIC) {
+                // Small displacement = a tap, not a swipe. This unit's touch
+                // panel reports X mirrored relative to the display (see the
+                // swipe-direction fix above), so undo that for absolute
+                // hit-testing too, not just the relative dx sign.
+                int32_t screen_x = (kScreenW - 1) - last_x;
+                bool right_half = screen_x >= (kScreenW / 2);
+                if (right_half) {
+                    haptic.effect_id = (haptic.effect_id % kHapticEffectMax) + 1;
+                } else {
+                    haptic.effect_id = (haptic.effect_id == 1) ? kHapticEffectMax : haptic.effect_id - 1;
+                }
+                haptic_play(haptic.effect_id);
+                ESP_LOGI(TAG, "haptic effect -> %u", haptic.effect_id);
+                render_view(current, *frame_cur, wf, batt, gps, tilt, haptic);
+                push_frame_locked(lcd, *frame_cur, pm_lock);
             }
         }
 

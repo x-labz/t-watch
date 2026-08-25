@@ -12,3 +12,4 @@ void render_watchface(LGFX_Sprite &fb, const WatchfaceVM &vm);
 void render_battery(LGFX_Sprite &fb, const BatteryVM &vm);
 void render_gps(LGFX_Sprite &fb, const GpsVM &vm);
 void render_tilt(LGFX_Sprite &fb, const TiltVM &vm);
+void render_haptic(LGFX_Sprite &fb, const HapticVM &vm);
