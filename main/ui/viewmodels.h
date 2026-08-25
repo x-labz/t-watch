@@ -56,3 +56,15 @@ struct WifiVM {
     uint8_t count = 0;
     WifiApVM aps[10];
 };
+
+struct BleDevVM {
+    char name[25] = {0};    // empty when the device advertises no name
+    char addr[18] = {0};    // pre-formatted "AA:BB:CC:DD:EE:FF"
+    int8_t rssi = 0;
+};
+
+struct BleVM {
+    bool scanning = false;
+    uint8_t count = 0;
+    BleDevVM devs[10];
+};

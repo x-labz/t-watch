@@ -19,3 +19,14 @@ CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# BLE scanner view. NimBLE rather than Bluedroid: this board only ever needs
+# BLE (no classic BR/EDR), and NimBLE costs far less RAM/flash for that.
+# BLE-only controller mode for the same reason. Note this makes the
+# esp_bt_controller_mem_release() suggestion in section 9 inapplicable —
+# the controller is now used, just kept off between scans.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BTDM_CTRL_MODE_BLE_ONLY=y
+CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=n
+CONFIG_BTDM_CTRL_MODE_BTDM=n

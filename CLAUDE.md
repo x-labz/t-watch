@@ -415,7 +415,7 @@ struct ViewDef {
 is currently a flat left-to-right strip navigated by horizontal swipes only, with
 `ViewId` order in `main/ui/view.h` authoritative (no `view_grid.cpp` yet):
 ```
-[WATCHFACE] ↔ [BATTERY] ↔ [GPS] ↔ [TILT] ↔ [HAPTIC] ↔ [SETTINGS] ↔ [WIFI]
+[WATCHFACE] ↔ [BATTERY] ↔ [GPS] ↔ [TILT] ↔ [HAPTIC] ↔ [SETTINGS] ↔ [WIFI] ↔ [BLE]
 ```
 Ends clamp (no wraparound). Per-view tap behavior, where a view has any:
 | View | Tap behavior | Notes |
@@ -423,8 +423,10 @@ Ends clamp (no wraparound). Per-view tap behavior, where a view has any:
 | HAPTIC | left/right = prev/next DRV2605 ROM effect (1–123), plays it | |
 | SETTINGS | left/right = dim/brighten backlight ~10% per tap | persisted to NVS (flash) |
 | WIFI | anywhere = rescan | scan also fires on focus |
+| BLE | anywhere = rescan | scan also fires on focus |
 Views that own a peripheral acquire it on focus and release on blur — currently GPS
-(LDO4) does this; WIFI instead scans one-shot and tears the radio fully down each time.
+(LDO4) does this. WIFI and BLE instead scan one-shot and tear their radio fully down
+each time, so there is nothing to release on blur.
 
 - PEK short-press: global "back to WATCHFACE" from anywhere.
 - Swipe transition: ~200 ms slide rendering BOTH views into the strips with offset.
@@ -609,7 +611,7 @@ turns it back off).
 | Panel | `lcd.sleep()` (ST7789 sleep-in); for long idle also **LDO3 off** | after backlight off; LDO3 off ⇒ full section-3 re-init on wake |
 | Touch | powered by LDO3 → dies with panel (that's fine: no screen = no touch) | with display |
 | WiFi | `esp_wifi_stop()` + `esp_wifi_deinit()` | immediately after each sync/fetch — never leave STA idling. Implemented pattern (`main/wifiscan.cpp`): a background task does init → `WIFI_MODE_STA` → start → blocking scan → read records → stop → deinit, so the radio is up only for the ~2 s the scan takes. Results are a static snapshot; refreshing means running the whole cycle again |
-| BT/BLE | controller disable + deinit; if unused in the product at all, `esp_bt_controller_mem_release()` at boot (frees RAM too) | whenever no active BLE session |
+| BT/BLE | controller disable + deinit | whenever no active BLE session. **NimBLE, BLE-only mode** (`CONFIG_BT_NIMBLE_ENABLED`, `CONFIG_BTDM_CTRL_MODE_BLE_ONLY`) — no classic BR/EDR is ever needed here, and NimBLE costs far less RAM/flash than Bluedroid. Implemented pattern (`main/blescan.cpp`): `nimble_port_init()` → host task → bounded `ble_gap_disc()` window (4 s, passive) → `nimble_port_stop()` + `nimble_port_deinit()`. The `esp_bt_controller_mem_release()`-at-boot trick NO LONGER APPLIES — the controller is used, just kept down between scans. Verified 2026-08-25: repeated init/deinit cycles do not leak (internal heap 180263 B after 1 cycle vs 180131 B after 3) |
 | DRV2605 | standby bit via SensorLib | between effects, always |
 | IR LED / RMT | RMT channel disable | after send |
 | **BMA423** | **stays ON** (µA-range) — it is the wake source (tilt / double-tap) | never |
@@ -711,9 +713,17 @@ Rules:
 Port is `/dev/ttyUSB0` on most units, `/dev/ttyACM0` on the primary dev unit — see
 section 5. Substitute whichever `ls /dev/ttyUSB* /dev/ttyACM*` shows on your unit.
 
+**The port number is NOT stable.** A brownout reset re-enumerates the USB device, and
+it can come back as `ttyACM1`, `ttyACM2`, … Symptoms are confusing: flash fails with a
+bare `ninja: build stopped`, or a serial capture silently produces an empty log while
+the watch is plainly running. Resolve the port per-invocation rather than hardcoding it:
+```bash
+PORT=$(ls /dev/ttyACM* /dev/ttyUSB* 2>/dev/null | head -1)
+```
+
 ```bash
 idf.py build
-idf.py -p /dev/ttyACM0 -b 921600 flash     # drop to 460800/115200 on sync errors
+idf.py -p "$PORT" -b 921600 flash          # drop to 460800/115200 on sync errors
 ```
 
 If a fresh `dialout` group membership hasn't propagated to the current shell yet

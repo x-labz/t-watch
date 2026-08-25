@@ -1,16 +1,20 @@
 #include "ui_task.h"
 
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <utility>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_pm.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "blescan.h"
 #include "debug_console.h"
 #include "gps.h"
 #include "haptic.h"
@@ -103,6 +107,24 @@ static WifiVM to_wifi_vm(const WifiScanResult &r)
     return vm;
 }
 
+static BleVM to_ble_vm(const BleScanResult &r)
+{
+    BleVM vm;
+    vm.scanning = r.scanning;
+    vm.count = r.count;
+    for (uint8_t i = 0; i < r.count && i < 10; i++) {
+        strncpy(vm.devs[i].name, r.devs[i].name, sizeof(vm.devs[i].name) - 1);
+        vm.devs[i].rssi = r.devs[i].rssi;
+        // NimBLE stores the address little-endian; print it the conventional
+        // way (most-significant octet first) so it matches what phone BLE
+        // scanner apps show.
+        const uint8_t *a = r.devs[i].addr;
+        snprintf(vm.devs[i].addr, sizeof(vm.devs[i].addr), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 a[5], a[4], a[3], a[2], a[1], a[0]);
+    }
+    return vm;
+}
+
 static const char *view_name(ViewId id)
 {
     switch (id) {
@@ -113,13 +135,14 @@ static const char *view_name(ViewId id)
         case ViewId::HAPTIC: return "HAPTIC";
         case ViewId::SETTINGS: return "SETTINGS";
         case ViewId::WIFI: return "WIFI";
+        case ViewId::BLE: return "BLE";
         default: return "?";
     }
 }
 
 static void render_view(ViewId id, LGFX_Sprite &frame, const WatchfaceVM &wf, const BatteryVM &batt,
                          const GpsVM &gps, const TiltVM &tilt, const HapticVM &haptic,
-                         const SettingsVM &settings, const WifiVM &wifi)
+                         const SettingsVM &settings, const WifiVM &wifi, const BleVM &ble)
 {
     switch (id) {
         case ViewId::WATCHFACE: render_watchface(frame, wf); break;
@@ -129,6 +152,7 @@ static void render_view(ViewId id, LGFX_Sprite &frame, const WatchfaceVM &wf, co
         case ViewId::HAPTIC: render_haptic(frame, haptic); break;
         case ViewId::SETTINGS: render_settings(frame, settings); break;
         case ViewId::WIFI: render_wifi(frame, wifi); break;
+        case ViewId::BLE: render_ble(frame, ble); break;
         default: break;
     }
 }
@@ -245,9 +269,10 @@ static void ui_task_fn(void *arg)
     SettingsVM settings;
     settings.brightness_pct = (uint8_t)(((uint32_t)brightness * 100 + 127) / 255);
     WifiVM wifi = to_wifi_vm(wifi_scan_read());
+    BleVM ble = to_ble_vm(ble_scan_read());
 
     auto redraw = [&]() {
-        render_view(current, *frame_cur, wf, batt, gps, tilt, haptic, settings, wifi);
+        render_view(current, *frame_cur, wf, batt, gps, tilt, haptic, settings, wifi, ble);
         push_frame_locked(lcd, *frame_cur, pm_lock);
     };
 
@@ -262,7 +287,11 @@ static void ui_task_fn(void *arg)
             wifi_scan_start();
             wifi = to_wifi_vm(wifi_scan_read());
         }
-        render_view(next, *frame_other, wf, batt, gps, tilt, haptic, settings, wifi);
+        if (next == ViewId::BLE) {
+            ble_scan_start();
+            ble = to_ble_vm(ble_scan_read());
+        }
+        render_view(next, *frame_other, wf, batt, gps, tilt, haptic, settings, wifi, ble);
         animate_swipe(lcd, *frame_cur, *frame_other, to_enters_from_right, strips, pm_lock);
 
         // GPS is the single biggest power draw on this board (CLAUDE.md
@@ -307,6 +336,11 @@ static void ui_task_fn(void *arg)
             wifi = to_wifi_vm(wifi_scan_read());
             ESP_LOGI(TAG, "wifi rescan requested");
             redraw();
+        } else if (current == ViewId::BLE) {
+            ble_scan_start();
+            ble = to_ble_vm(ble_scan_read());
+            ESP_LOGI(TAG, "ble rescan requested");
+            redraw();
         }
     };
 
@@ -343,8 +377,15 @@ static void ui_task_fn(void *arg)
                     do_tap(dbg.tap_x);
                     break;
                 case DebugCmdType::STATUS:
-                    ESP_LOGI(TAG, "status: view=%s wifi_scanning=%d wifi_count=%u brightness=%ld",
-                             view_name(current), (int)wifi.scanning, wifi.count, (long)brightness);
+                    // Free-heap is here mainly to catch leaks across repeated
+                    // radio bring-up/teardown cycles (wifi + nimble both fully
+                    // init and deinit per scan).
+                    ESP_LOGI(TAG, "status: view=%s wifi(scanning=%d count=%u) ble(scanning=%d count=%u) "
+                                  "brightness=%ld heap=%u internal=%u",
+                             view_name(current), (int)wifi.scanning, wifi.count,
+                             (int)ble.scanning, ble.count, (long)brightness,
+                             (unsigned)esp_get_free_heap_size(),
+                             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
                     break;
                 default: break;
             }
@@ -364,6 +405,7 @@ static void ui_task_fn(void *arg)
             gps = to_gps_vm(gps_read());
             tilt = to_tilt_vm(tilt_read());
             if (current == ViewId::WIFI) wifi = to_wifi_vm(wifi_scan_read());
+            if (current == ViewId::BLE) ble = to_ble_vm(ble_scan_read());
 
             redraw();
         }
@@ -405,7 +447,8 @@ static void ui_task_fn(void *arg)
                 }
                 ViewId next = static_cast<ViewId>(next_idx);
                 switch_view(next, to_enters_from_right);
-            } else if (current == ViewId::HAPTIC || current == ViewId::SETTINGS || current == ViewId::WIFI) {
+            } else if (current == ViewId::HAPTIC || current == ViewId::SETTINGS ||
+                       current == ViewId::WIFI || current == ViewId::BLE) {
                 // Small displacement = a tap, not a swipe. This unit's touch
                 // panel reports X mirrored relative to the display (see the
                 // swipe-direction fix above), so undo that for absolute

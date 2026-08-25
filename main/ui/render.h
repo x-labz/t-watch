@@ -15,3 +15,4 @@ void render_tilt(LGFX_Sprite &fb, const TiltVM &vm);
 void render_haptic(LGFX_Sprite &fb, const HapticVM &vm);
 void render_settings(LGFX_Sprite &fb, const SettingsVM &vm);
 void render_wifi(LGFX_Sprite &fb, const WifiVM &vm);
+void render_ble(LGFX_Sprite &fb, const BleVM &vm);

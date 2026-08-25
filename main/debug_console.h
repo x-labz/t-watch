@@ -8,7 +8,7 @@
 // swipe/tap. Shares the console UART with ESP_LOGx output (CLAUDE.md section
 // 11: no separate debug UART on this board). Commands, one per line:
 //   view <name>              - jump directly to a view (watchface, battery,
-//                               gps, tilt, haptic, settings, wifi)
+//                               gps, tilt, haptic, settings, wifi, ble)
 //   next / prev               - swipe to the next/previous view
 //   tap [left|right|center]   - simulate a tap (default center)
 //   status                    - log the current view + key state

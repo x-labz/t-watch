@@ -16,7 +16,7 @@ static QueueHandle_t s_queue;
 // pulling in ui/view.h, since this console has no other reason to know about
 // view rendering.
 static const char *kViewNames[] = {
-    "watchface", "battery", "gps", "tilt", "haptic", "settings", "wifi",
+    "watchface", "battery", "gps", "tilt", "haptic", "settings", "wifi", "ble",
 };
 static constexpr int kViewCount = sizeof(kViewNames) / sizeof(kViewNames[0]);
 
