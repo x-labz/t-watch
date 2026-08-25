@@ -237,12 +237,14 @@ re-enable, re-run lcd.init().
 │   ├── LovyanGFX/             ← git submodule: https://github.com/lovyan03/LovyanGFX (master)
 │   └── XPowersLib/            ← git submodule: https://github.com/lewisxhe/XPowersLib (master)
 ├── main/
-│   ├── CMakeLists.txt         ← idf_component_register(... REQUIRES LovyanGFX XPowersLib driver esp_timer nvs_flash)
+│   ├── CMakeLists.txt         ← idf_component_register(... REQUIRES LovyanGFX XPowersLib lewisxhe__sensorlib driver esp_timer esp_pm nvs_flash esp_wifi esp_netif esp_event)
 │   ├── idf_component.yml      ← managed deps (SensorLib; + lvgl ONLY if PATH B)
 │   ├── main.cpp               ← ESP-IDF entry: PMU, lcd, tasks     (watch only)
 │   ├── twatch_v2_pins.h       ← all constants from section 2
 │   ├── lgfx_twatch_v2.hpp     ← LGFX_Device subclass (section 5)   (watch only)
 │   ├── power.cpp/.h           ← AXP202 wrapper implementing section 3 (watch only)
+│   ├── ui_task.cpp/.h         ← the one UI/compositor task: input, nav, redraw
+│   ├── debug_console.cpp/.h   ← serial command console (section 11, watch only)
 │   ├── services/              ← refcounted peripheral owners (section 6, watch only)
 │   │   ├── gps_service.cpp/.h        ├── power_service.cpp/.h
 │   │   ├── motion_service.cpp/.h     ├── time_service.cpp/.h
@@ -253,6 +255,14 @@ re-enable, re-run lcd.init().
 │       ├── viewmodels.h       ← WatchfaceVM, GpsVM, StepsVM, ...
 │       ├── render_watchface.cpp / render_gps.cpp / ...
 │       └── logic_*.cpp        ← pure compute_* functions (sim-testable)
+
+**As built (2026-08-25):** peripheral owners are currently flat modules in `main/`
+(`gps`, `tilt`, `haptic`, `touch`, `settings`, `wifiscan`, `time_sync`) rather than a
+`services/` directory with the refcount base class — `gps` is the only one that
+actually refcounts so far. `main/ui/` holds `view.h` + one `render_*.cpp` per view;
+`view_grid.cpp` and `logic_*.cpp` do not exist yet (nav order lives in `ViewId`).
+The sim (`sim/`) has not been built yet either — visual checks are tier-2/3 of
+section 12 for now.
 ├── sim/                       ← PC simulator (section 10)
 │   ├── CMakeLists.txt         ← desktop build: SDL2 + LovyanGFX + ../main/ui/
 │   └── main.cpp               ← LGFX_SDL device, fake services→VMs, --shot mode
@@ -401,14 +411,21 @@ struct ViewDef {
   void (*on_event)(const ViewMsg&);      // passive views: handled in UI task
 };
 ```
-Initial grid (editable — keep the table in `main/ui/view_grid.cpp` authoritative):
+**As built (2026-08-25):** the grid above was the original sketch; the implementation
+is currently a flat left-to-right strip navigated by horizontal swipes only, with
+`ViewId` order in `main/ui/view.h` authoritative (no `view_grid.cpp` yet):
 ```
-                 [NOTIF]
-                    ↑
-   [STEPS] ← [WATCHFACE] → [GPS]
-                    ↓
-                [SETTINGS]
+[WATCHFACE] ↔ [BATTERY] ↔ [GPS] ↔ [TILT] ↔ [HAPTIC] ↔ [SETTINGS] ↔ [WIFI]
 ```
+Ends clamp (no wraparound). Per-view tap behavior, where a view has any:
+| View | Tap behavior | Notes |
+|---|---|---|
+| HAPTIC | left/right = prev/next DRV2605 ROM effect (1–123), plays it | |
+| SETTINGS | left/right = dim/brighten backlight ~10% per tap | persisted to NVS (flash) |
+| WIFI | anywhere = rescan | scan also fires on focus |
+Views that own a peripheral acquire it on focus and release on blur — currently GPS
+(LDO4) does this; WIFI instead scans one-shot and tears the radio fully down each time.
+
 - PEK short-press: global "back to WATCHFACE" from anywhere.
 - Swipe transition: ~200 ms slide rendering BOTH views into the strips with offset.
   Acquire `ESP_PM_CPU_FREQ_MAX` lock at transition start, release at end (section 9).
@@ -462,6 +479,18 @@ Views/logic NEVER touch AXP202, I2C devices, UART, or radios directly. Services 
   message passing over locks.
 - Services communicate upward by POSTING EVENTS (MotionService → WRIST_TILT → UI task
   → screen wake). Services never call into views.
+
+### Where state lives — RTC memory vs NVS (flash)
+Two persistence tiers, and picking the wrong one is a silent bug:
+| | RTC memory (`RTC_DATA_ATTR`) | NVS (flash) |
+|---|---|---|
+| Survives | deep sleep, SW reset | everything, incl. full power-off / battery pull |
+| Cost | free (8 KB slow domain) | flash wear, ~ms writes |
+| Use for | **caches** that are cheap to re-derive | **user settings** that must never be lost |
+| In use | GPS-derived timezone offset (`time_sync.cpp`) — re-derivable from a fix | backlight brightness (`settings.cpp`) |
+Rule: if losing it merely costs a re-derivation, RTC memory; if losing it would
+surprise the user, NVS. Never put a user-visible setting in RTC memory only —
+it comes back as the default after the battery dies.
 
 ### Sim-shareability rule
 Interesting view logic goes into pure functions (`WatchfaceVM compute_watchface(...)`)
@@ -579,7 +608,7 @@ turns it back off).
 | Backlight | LDO2 off; dim first by lowering LDO2 voltage | screen timeout (default 10 s without touch) |
 | Panel | `lcd.sleep()` (ST7789 sleep-in); for long idle also **LDO3 off** | after backlight off; LDO3 off ⇒ full section-3 re-init on wake |
 | Touch | powered by LDO3 → dies with panel (that's fine: no screen = no touch) | with display |
-| WiFi | `esp_wifi_stop()` + `esp_wifi_deinit()` | immediately after each sync/fetch — never leave STA idling |
+| WiFi | `esp_wifi_stop()` + `esp_wifi_deinit()` | immediately after each sync/fetch — never leave STA idling. Implemented pattern (`main/wifiscan.cpp`): a background task does init → `WIFI_MODE_STA` → start → blocking scan → read records → stop → deinit, so the radio is up only for the ~2 s the scan takes. Results are a static snapshot; refreshing means running the whole cycle again |
 | BT/BLE | controller disable + deinit; if unused in the product at all, `esp_bt_controller_mem_release()` at boot (frees RAM too) | whenever no active BLE session |
 | DRV2605 | standby bit via SensorLib | between effects, always |
 | IR LED / RMT | RMT channel disable | after send |
@@ -708,11 +737,41 @@ idf.py -p /dev/ttyACM0 flash && stty -F /dev/ttyACM0 115200 raw -echo && \
 idf.py -p /dev/ttyACM0 monitor 2>&1 | tee monitor.log &
 ```
 
+### Serial debug console — drive the UI without touching the watch
+`main/debug_console.cpp` reads newline-terminated commands from the console UART
+(shared with ESP_LOGx; there is no second UART free for a dedicated debug link).
+Started from `app_main()` via `debug_console_start()`; the UI task drains the
+queue with `debug_console_poll()` each loop, routing commands through the SAME
+`switch_view()` / `do_tap()` paths physical gestures use — so a console repro
+exercises the real code path, not a parallel one.
+
+| Command | Effect |
+|---|---|
+| `view <name>` | jump to a view: watchface, battery, gps, tilt, haptic, settings, wifi |
+| `next` / `prev` | swipe to the next/previous view |
+| `tap [left\|right]` | simulate a tap (default center) |
+| `status` | log current view + key state |
+
+This exists because physical-gesture testing races the serial capture window
+(the agent cannot time a swipe against a `timeout N cat`). Scripted repro:
+```bash
+sg dialout -c '
+stty -F /dev/ttyACM0 115200 raw -echo
+exec 3<>/dev/ttyACM0
+cat <&3 > session.log &
+sleep 2; printf "view wifi\n" >&3; sleep 6; printf "tap\n" >&3; sleep 6
+kill %1; exec 3<&-'
+```
+Add a command here rather than adding a one-off test build whenever a bug needs
+a repeatable trigger.
+
 ### Crash decoding
 ```bash
 xtensa-esp32-elf-addr2line -pfiaC -e build/<project>.elf <addr1> <addr2> ...
 ```
 (`idf.py monitor` auto-decodes; raw `cat` does not.)
+Decode BOTH cores' backtraces on a dual-core hang — the stalled core names the
+culprit, the other usually just shows the tick spinlock it is stuck behind.
 
 ### Flash recovery
 No BOOT/EN buttons. If auto-download fails (e.g. firmware deep-sleeps immediately):
@@ -763,6 +822,8 @@ tier 3 "is my panel config right?".
 | Sim renders differ from watch | Different color depth or font set between builds — keep them identical |
 | Battery drains overnight | LDO4/GPS or WiFi left on, or no sleep ladder — audit section 9 gating table |
 | Display corrupts only when idle/DFS on | Frame pushed without CPU/APB max-freq lock held (section 9) |
+| `Interrupt wdt timeout`, one core looping in `vListInsert`/`vTaskPlaceOnEventList`, other spinning on the tick spinlock | A **blocking call inside `portENTER_CRITICAL`**. Interrupts are off and a spinlock is held, so blocking corrupts scheduler state and wedges both cores. Hit for real with `esp_wifi_scan_get_ap_records()` inside the lock (2026-08-25). Critical sections may ONLY copy plain data — never call a driver/IPC/WiFi API inside one |
+| Boot log ends at `tilt_init() failed` (`bma423_init failed with code -2`) | Transient I2C/power flake on this unit, NOT a driver bug — `main.cpp` aborts `app_main()` on any failed init step, so it looks like "firmware never starts". Just reboot/reflash and retry (see also the brownout row above) |
 
 ## 14. Power-key (PEK) handling
 The side button is NOT a GPIO. AXP202 raises IRQ on GPIO35; read/clear IRQ status
