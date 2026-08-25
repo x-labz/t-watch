@@ -44,6 +44,18 @@ static constexpr float kCountsPerG = 1024.0f;
 static i2c_master_dev_handle_t s_dev = nullptr;
 static bool s_ready = false;
 
+// The BMA423 can silently revert to its power-on defaults — observed
+// 2026-08-25 after a USB unplug, presumably a rail dip: ACC_CONF went 0xA8 ->
+// 0x00 and PWR_CONF 0x00 -> 0x03 (advanced power save on), after which every
+// axis reads exactly 0. That is physically impossible — gravity is always
+// ~1g in total — so an all-zero vector is a reliable "the chip has lost its
+// configuration" signal. It matters more than it sounds: screen wake compares
+// the live vector against one sampled at blank time, so a stuck-at-zero
+// accelerometer means the watch can never wake itself and the screen just
+// stays black.
+static constexpr int kZeroReadsBeforeReinit = 5;
+static int s_zero_reads = 0;
+
 static esp_err_t reg_read(uint8_t reg, uint8_t *buf, size_t len)
 {
     if (s_dev == nullptr) return ESP_ERR_INVALID_STATE;
@@ -103,7 +115,10 @@ esp_err_t tilt_init(void)
         ESP_LOGE(TAG, "enabling accelerometer failed: %s", esp_err_to_name(err));
         return ESP_FAIL;
     }
-    vTaskDelay(pdMS_TO_TICKS(10));
+    // The accelerometer needs time after acc_en before it produces samples;
+    // 10 ms was not enough and the first reads came back all-zero, tripping
+    // the self-heal on every boot. 50 ms settles it.
+    vTaskDelay(pdMS_TO_TICKS(50));
 
     s_ready = true;
     ESP_LOGI(TAG, "BMA423 ready (direct driver, chip id 0x%02X)", id);
@@ -126,6 +141,17 @@ TiltReading tilt_read(void)
     if (reg_read(kRegAccData, d, sizeof(d)) != ESP_OK) {
         return r;
     }
+
+    if (d[0] == 0 && d[1] == 0 && d[2] == 0 && d[3] == 0 && d[4] == 0 && d[5] == 0) {
+        if (++s_zero_reads >= kZeroReadsBeforeReinit) {
+            s_zero_reads = 0;
+            ESP_LOGW(TAG, "accelerometer reading all-zero — reconfiguring");
+            s_ready = false;
+            tilt_init();
+        }
+        return r;
+    }
+    s_zero_reads = 0;
 
     // 12-bit signed, left-aligned in each 16-bit little-endian pair: combining
     // then dividing by 16 sign-extends correctly without manual bit fiddling.
