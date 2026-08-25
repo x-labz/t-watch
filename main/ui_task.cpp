@@ -400,6 +400,15 @@ static void ui_task_fn(void *arg)
                 case DebugCmdType::TOUCH_SLEEP:
                     touch_force_deepsleep();
                     break;
+                case DebugCmdType::TOUCH_DUMP:
+                    touch_dump_registers();
+                    break;
+                case DebugCmdType::TOUCH_MON:
+                    touch_monitor_raw(10);
+                    break;
+                case DebugCmdType::TOUCH_WRITE:
+                    touch_write_reg(dbg.reg, dbg.val);
+                    break;
                 case DebugCmdType::LDO3_MODE:
                     power_set_ldo3_dcin_mode(dbg.flag);
                     vTaskDelay(pdMS_TO_TICKS(200));

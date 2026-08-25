@@ -177,9 +177,17 @@ software for power (section 9).
   driver, the only documented way out is pulling the reset line (AXP202 EXTEN)
   low. Never diagnose "the FT6336 is dead" without first resetting it and
   explicitly writing ACTIVE to 0xA5 — see section 13.
-- Related registers worth setting at init (LilyGO does): `0xA4`=1 enables the
-  touch interrupt, `0x87` monitor-entry time (default 0x0A), `0x89` monitor
-  report period (default 0x28)
+- **Do NOT "helpfully" configure the rest of the chip.** An EXTEN reset already
+  leaves it in a working default state (`0x00`=0 working mode, `0x80`=0x1C
+  threshold, `0x86`=1, `0x87`=0x1E, `0x89`=0x28 on this unit). Writing the
+  INT-mode (`0xA4`) and monitor-timing (`0x87`) registers at init — which
+  LilyGO's driver does for its own interrupt-driven design — produced a chip
+  that answered I2C perfectly, reported valid IDs and mode, and **silently
+  reported zero touch points forever** (2026-08-25). We poll; we do not need
+  them. `touch_init()` therefore forces only the power mode.
+- Sanity values on this unit: `0xA3` (chip id) = `0x64` (FT6236U), `0xA8`
+  (vendor id) = `0x11`, `0xA1/0xA2` (fw version) = `0x30 0x0A`. `0xA9` reads
+  `0x0F` even when everything is healthy — do not read that as an error.
 
 **DRV2605 (haptics)**
 - 123 pre-programmed ROM effects (clicks, ticks, buzzes, ramps, alerts)
@@ -796,7 +804,17 @@ exercises the real code path, not a parallel one.
 | `touch` | touch health: consecutive I2C errors, probe of 0x38, rail states, scan of BOTH I2C buses |
 | `touchfix` | force touch recovery (LDO3 cycle + EXTEN reset + reconfigure) |
 | `touchsleep` | put the FT6336 into DEEPSLEEP — reproduces the "dead touch" failure on demand |
+| `touchdump` | dump FT6336 mode/config/status registers (compare against the sanity values in section 2) |
+| `touchmon` | poll raw touch status for 10 s — proves whether the sensor reports points at all |
+| `treg <hex> <hex>` | write any FT6336 register, so config hypotheses can be tested without a reflash |
 | `ldo3 0\|1` | set AXP202 LDO3 mode (0 = LDO, 1 = DCIN). Diagnostic only — **leave it at 0** |
+
+**Diagnosing touch is a two-question problem, and conflating them wasted hours
+on 2026-08-25.** Ask them in order: (1) *Does the chip answer I2C?* — `touch`
+scans both buses; silence on bus 1 means DEEPSLEEP, not dead hardware.
+(2) *Does it report points?* — `touchmon` while a finger is actually held on
+the glass. A chip can pass (1) perfectly and still fail (2). Never infer (2)
+from an empty log without confirming a human was really touching the screen.
 
 This exists because physical-gesture testing races the serial capture window
 (the agent cannot time a swipe against a `timeout N cat`). Scripted repro:
@@ -862,6 +880,7 @@ tier 3 "is my panel config right?".
 | Touch works then dies after sleep | EXTEN disabled during sleep, not re-toggled on wake |
 | **Touch totally dead: I2C1 scan finds ZERO devices, reads fail `ESP_ERR_INVALID_STATE`, survives reboot AND battery pull, but bus 0 is fine and the panel renders** | **FT6336 left in DEEPSLEEP (reg 0xA5 = 3)** — it draws 100µA and ignores I2C entirely. This is NOT dead hardware, though it is indistinguishable from it by measurement alone. Hit for real 2026-08-25 and misdiagnosed as a hardware failure for hours. Fix: EXTEN reset, then explicitly write `0xA5 = 0` (ACTIVE). `touch_init()` now does this and `touch_read()` self-heals after ~5 s of solid failure. Console: `touch` to inspect, `touchfix` to force recovery, `touchsleep` to reproduce it |
 | Touch dead only in OUR firmware but fine in vendor firmware | Same DEEPSLEEP cause as above. **Key lesson: state persists across reflashes.** LDO3 stays powered through a flash, so the FT6336 never cold-boots, and AXP202 registers are battery-backed too. Flashing vendor firmware "fixes" it because that firmware explicitly programs the chip — which is why the bug looked like it lived in our code when it lived in inherited *device state* |
+| **Touch reads SUCCEED (0 I2C errors, 0x38 probes OK, registers read sane values) but `0x02` is always 0 — no finger is ever reported** | **Over-configuration, not a fault.** Writing the INT-mode (`0xA4`) / monitor-timing (`0x87`) registers at init leaves the chip healthy-looking but not reporting points to a polling driver (hit 2026-08-25 while "fixing" the DEEPSLEEP bug above — the fix caused this). An EXTEN reset already gives working defaults: force ONLY power mode `0xA5`=0 and write nothing else. Use `touchdump` to compare against the sanity values in section 2 |
 | Watch won't enumerate on USB | Watch powered off (long-press PEK), or dead battery |
 | Flash fails "Failed to write to target RAM" | Lower baud (460800/115200); check CH340 driver |
 | Permission denied /dev/ttyUSB0 | User not in dialout group |

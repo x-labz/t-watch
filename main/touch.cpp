@@ -60,14 +60,18 @@ static esp_err_t write_reg(uint8_t reg, uint8_t val)
 // it first if it is not.
 static void configure_chip(void)
 {
+    // Deliberately minimal. An EXTEN reset already leaves the controller in a
+    // working default configuration — the long-standing driver here wrote no
+    // registers at all and touch worked. The ONLY thing worth forcing is the
+    // power mode, because DEEPSLEEP is the one state a reset alone may not
+    // clear and it makes the chip look like dead hardware. Writing the monitor
+    // and INT-mode registers on top of that gained nothing and is exactly the
+    // kind of change that can stop a working panel from reporting points, so
+    // it is not done here.
     esp_err_t err = write_reg(kRegPowerMode, kPmodeActive);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "could not set power mode: %s", esp_err_to_name(err));
-        return;
     }
-    write_reg(kRegIntStatus, 1);
-    write_reg(kRegMonitorTime, kMonitorTimeDefault);
-    write_reg(kRegMonitorPeriod, kMonitorPeriodDefault);
 }
 
 esp_err_t touch_init(void)
@@ -164,6 +168,57 @@ void touch_scan_bus(void)
     }
     ESP_LOGW(TAG, "i2c1 scan done: %d device(s) (expect FT6336 at 0x%02x)",
              found, TWATCH_ADDR_FT6336);
+}
+
+esp_err_t touch_write_reg(uint8_t reg, uint8_t val)
+{
+    esp_err_t err = write_reg(reg, val);
+    ESP_LOGW(TAG, "write reg 0x%02X = 0x%02X: %s", reg, val, esp_err_to_name(err));
+    return err;
+}
+
+static esp_err_t read_reg(uint8_t reg, uint8_t *val)
+{
+    return i2c_master_transmit_receive(s_dev, &reg, 1, val, 1, 50);
+}
+
+void touch_dump_registers(void)
+{
+    // 0x00 DEVICE_MODE (0 = normal working mode; 0x40 = factory/test mode, in
+    // which the chip answers I2C but never reports touches), 0x01 gesture,
+    // 0x02 points, 0x80 threshold, 0x86 control, 0x87/0x88/0x89 monitor
+    // timings, 0xA1/0xA2 firmware version, 0xA3 chip id, 0xA5 power mode,
+    // 0xA6 firmware id, 0xA8 vendor id, 0xA9 error status.
+    static const uint8_t regs[] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+                                   0x80, 0x86, 0x87, 0x88, 0x89,
+                                   0xA1, 0xA2, 0xA3, 0xA5, 0xA6, 0xA8, 0xA9};
+    for (uint8_t reg : regs) {
+        uint8_t v = 0;
+        esp_err_t err = read_reg(reg, &v);
+        ESP_LOGW(TAG, "reg 0x%02X = 0x%02X%s", reg, v,
+                 err == ESP_OK ? "" : " (READ FAILED)");
+    }
+}
+
+void touch_monitor_raw(int seconds)
+{
+    ESP_LOGW(TAG, "raw touch monitor for %d s — TOUCH THE SCREEN NOW", seconds);
+    uint8_t last = 0xFF;
+    int hits = 0;
+    for (int i = 0; i < seconds * 50; i++) {
+        uint8_t reg = kRegStatus;
+        uint8_t buf[5] = {0};
+        if (i2c_master_transmit_receive(s_dev, &reg, 1, buf, sizeof(buf), 50) == ESP_OK) {
+            if (buf[0] != last) {
+                last = buf[0];
+                ESP_LOGW(TAG, "  status=0x%02X raw=%02X %02X %02X %02X", buf[0],
+                         buf[1], buf[2], buf[3], buf[4]);
+            }
+            if (buf[0] != 0) hits++;
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    ESP_LOGW(TAG, "raw monitor done: %d readings reported a touch point", hits);
 }
 
 esp_err_t touch_force_deepsleep(void)

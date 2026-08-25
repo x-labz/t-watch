@@ -82,6 +82,19 @@ static void debug_console_task(void *)
             cmd.type = DebugCmdType::TOUCH_FIX;
         } else if (strcmp(line, "touchsleep") == 0) {
             cmd.type = DebugCmdType::TOUCH_SLEEP;
+        } else if (strcmp(line, "touchdump") == 0) {
+            cmd.type = DebugCmdType::TOUCH_DUMP;
+        } else if (strcmp(line, "touchmon") == 0) {
+            cmd.type = DebugCmdType::TOUCH_MON;
+        } else if (strncmp(line, "treg ", 5) == 0) {
+            unsigned r = 0, v = 0;
+            if (sscanf(line + 5, "%x %x", &r, &v) != 2) {
+                ESP_LOGW(TAG, "usage: treg <hex reg> <hex val>");
+                continue;
+            }
+            cmd.type = DebugCmdType::TOUCH_WRITE;
+            cmd.reg = (uint8_t)r;
+            cmd.val = (uint8_t)v;
         } else if (strncmp(line, "ldo3 ", 5) == 0) {
             cmd.type = DebugCmdType::LDO3_MODE;
             cmd.flag = (line[5] == '1' || strcmp(line + 5, "dcin") == 0);

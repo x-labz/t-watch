@@ -26,3 +26,17 @@ void touch_scan_bus(void);                 // log every address that ACKs on I2C
 // Test hook: drops the controller into DEEPSLEEP, reproducing the "touch is
 // dead and never comes back" failure so the recovery path can be verified.
 esp_err_t touch_force_deepsleep(void);
+
+// Dumps the FT6336's mode/config/status registers. For the case where the chip
+// answers I2C fine but never reports a touch point — the registers say which
+// mode it is actually sitting in.
+void touch_dump_registers(void);
+
+// Polls the touch status register for `seconds` and logs every non-zero /
+// changed reading, so a human touching the panel produces visible evidence
+// independent of the UI task's gesture handling.
+void touch_monitor_raw(int seconds);
+
+// Write an arbitrary FT6336 register, so configuration hypotheses can be
+// tested from the console without a reflash (brownouts make each one costly).
+esp_err_t touch_write_reg(uint8_t reg, uint8_t val);
