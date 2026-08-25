@@ -1,6 +1,7 @@
 #include "esp_log.h"
 #include "power.h"
 #include "lgfx_twatch_v2.hpp"
+#include "touch.h"
 #include "ui_task.h"
 
 static const char *TAG = "MAIN";
@@ -26,7 +27,13 @@ extern "C" void app_main(void)
         return;
     }
     lcd.setBrightness(255);
-    ESP_LOGI(TAG, "lcd.init() OK — starting UI task");
+    ESP_LOGI(TAG, "lcd.init() OK");
+
+    if (touch_init() != ESP_OK) {
+        ESP_LOGE(TAG, "touch_init() failed");
+        return;
+    }
+    ESP_LOGI(TAG, "touch_init() OK — starting UI task");
 
     ui_task_start(lcd);
 }

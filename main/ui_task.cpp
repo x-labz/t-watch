@@ -10,6 +10,7 @@
 #include "freertos/task.h"
 
 #include "power.h"
+#include "touch.h"
 #include "ui/render.h"
 #include "ui/view.h"
 #include "ui/viewmodels.h"
@@ -104,19 +105,33 @@ static void ui_task_fn(void *arg)
 {
     auto &lcd = *static_cast<LGFX_TWatch2020V2 *>(arg);
 
+    // Full-frame sprites go in PSRAM: two of them (115.2KB each) don't both
+    // fit in the DMA-capable internal RAM createSprite() defaults to, and
+    // createSprite() fails silently on allocation failure (no crash, no log,
+    // just a null backing buffer that renders as blank) — this was the cause
+    // of the second view rendering empty. PSRAM is fine here since these are
+    // single occasional redraws, not the animated strip pipeline below.
     LGFX_Sprite frame_a;
     frame_a.setColorDepth(16);
-    frame_a.createSprite(kScreenW, kScreenH);
+    frame_a.setPsram(true);
+    if (!frame_a.createSprite(kScreenW, kScreenH)) {
+        ESP_LOGE(TAG, "frame_a.createSprite() failed");
+    }
 
     LGFX_Sprite frame_b;
     frame_b.setColorDepth(16);
-    frame_b.createSprite(kScreenW, kScreenH);
+    frame_b.setPsram(true);
+    if (!frame_b.createSprite(kScreenW, kScreenH)) {
+        ESP_LOGE(TAG, "frame_b.createSprite() failed");
+    }
 
     LGFX_Sprite strips[2];
     for (auto &s : strips) {
         s.setColorDepth(16);
         s.setPsram(false);   // DMA cannot read PSRAM (CLAUDE.md section 8)
-        s.createSprite(kScreenW, kStripH);
+        if (!s.createSprite(kScreenW, kStripH)) {
+            ESP_LOGE(TAG, "strip.createSprite() failed");
+        }
     }
 
     esp_pm_lock_handle_t pm_lock;
@@ -156,7 +171,7 @@ static void ui_task_fn(void *arg)
         }
 
         int32_t x = 0, y = 0;
-        bool pressed = lcd.getTouch(&x, &y);
+        bool pressed = touch_read(&x, &y);
         if (pressed) {
             if (!touching) {
                 touching = true;

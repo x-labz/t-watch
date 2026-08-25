@@ -5,12 +5,16 @@
 
 #include "twatch_v2_pins.h"
 
+// Touch is NOT wired up via LovyanGFX's Touch_FT5x06 here — see main/touch.h.
+// Its _check_init() requires a CIPHER-register handshake that fails on this
+// unit's FT6336, permanently locking out all reads (confirmed dead touch
+// across every LovyanGFX config tried). LilyGO's own vendor driver never
+// performs that handshake and works fine, so we read the chip directly.
 class LGFX_TWatch2020V2 : public lgfx::LGFX_Device
 {
     lgfx::Panel_ST7789 _panel;
     lgfx::Bus_SPI      _bus;
     lgfx::Light_PWM    _light;
-    lgfx::Touch_FT5x06 _touch;   // FT6336 is FT6x36-family: this class covers it
 
 public:
     LGFX_TWatch2020V2()
@@ -44,26 +48,6 @@ public:
             c.pwm_channel = 7;
             _light.config(c);
             _panel.setLight(&_light);
-        }
-        {
-            auto c = _touch.config();
-            c.i2c_port = TWATCH_I2C1_PORT;
-            c.pin_sda = TWATCH_PIN_I2C1_SDA;
-            c.pin_scl = TWATCH_PIN_I2C1_SCL;
-            // Polling mode (not the IRQ pin): LovyanGFX's FT5x06 driver gates
-            // reads behind pin_int's raw level, and disabling that gate made
-            // no observed difference on this unit either way — but polling
-            // matches our ~50Hz software loop in ui_task.cpp and removes one
-            // more variable, so it's the safer default going forward.
-            c.pin_int = -1;
-            c.i2c_addr = TWATCH_ADDR_FT6336;
-            c.freq = TWATCH_I2C1_FREQ_HZ;
-            c.x_min = 0;
-            c.x_max = 239;
-            c.y_min = 0;
-            c.y_max = 239;
-            _touch.config(c);
-            _panel.setTouch(&_touch);
         }
         setPanel(&_panel);
     }
